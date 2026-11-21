@@ -7,8 +7,10 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from copy import deepcopy
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -18,6 +20,141 @@ CODEX_CANDIDATES = (
 
 CODEX_EXEC_TIMEOUT_SECONDS = 12 * 60
 STATUS_TEXT_MAX = 160
+
+_SCHEMA_CONTAINER_KEYS = (
+    "properties",
+    "patternProperties",
+    "$defs",
+    "definitions",
+    "dependentSchemas",
+)
+_SCHEMA_LIST_KEYS = ("anyOf", "oneOf", "allOf", "prefixItems")
+
+
+def _is_object_schema(node: Mapping[str, Any]) -> bool:
+    schema_type = node.get("type")
+    if schema_type == "object":
+        return True
+    if isinstance(schema_type, list) and "object" in schema_type:
+        return True
+    return "properties" in node and schema_type is None
+
+
+def _walk_schema_for_codex(node: Any) -> None:
+    if not isinstance(node, dict):
+        return
+
+    for key in _SCHEMA_CONTAINER_KEYS:
+        container = node.get(key)
+        if isinstance(container, dict):
+            for value in container.values():
+                _walk_schema_for_codex(value)
+
+    for key in _SCHEMA_LIST_KEYS:
+        items = node.get(key)
+        if isinstance(items, list):
+            for item in items:
+                _walk_schema_for_codex(item)
+
+    items = node.get("items")
+    if isinstance(items, dict):
+        _walk_schema_for_codex(items)
+    elif isinstance(items, list):
+        for item in items:
+            _walk_schema_for_codex(item)
+
+    additional = node.get("additionalProperties")
+    if isinstance(additional, dict):
+        _walk_schema_for_codex(additional)
+
+    for key in ("not", "if", "then", "else"):
+        sub = node.get(key)
+        if isinstance(sub, dict):
+            _walk_schema_for_codex(sub)
+
+    ref = node.get("$ref")
+    if ref is not None:
+        node.clear()
+        node["$ref"] = ref
+        return
+
+    if _is_object_schema(node):
+        node["additionalProperties"] = False
+        props = node.get("properties")
+        if isinstance(props, dict):
+            node["required"] = list(props.keys())
+        else:
+            node["required"] = []
+
+
+def codex_compatible_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Codex strict output schemas need additionalProperties: false and required on every object."""
+    copy = deepcopy(schema)
+    _walk_schema_for_codex(copy)
+    return copy
+
+
+def lint_codex_compatible_json_schema(
+    schema: Any, *, path: str = "$"
+) -> list[str]:
+    """Return human-readable violations of Codex strict JSON Schema rules."""
+    errors: list[str] = []
+    _lint_codex_schema_node(schema, path, errors)
+    return errors
+
+
+def _lint_codex_schema_node(node: Any, path: str, errors: list[str]) -> None:
+    if not isinstance(node, dict):
+        return
+
+    if "$ref" in node:
+        siblings = [key for key in node if key != "$ref"]
+        if siblings:
+            errors.append(f"{path}: $ref has sibling keys {siblings}")
+        return
+
+    if _is_object_schema(node):
+        if node.get("additionalProperties") is not False:
+            errors.append(f"{path}: object missing additionalProperties: false")
+        props = node.get("properties")
+        if isinstance(props, dict):
+            expected = list(props.keys())
+            required = node.get("required")
+            if not isinstance(required, list) or sorted(required) != sorted(expected):
+                errors.append(
+                    f"{path}: required must list all property keys "
+                    f"{expected!r}, got {required!r}"
+                )
+        elif node.get("required") not in (None, []):
+            errors.append(f"{path}: object without properties must have required []")
+
+    for key in _SCHEMA_CONTAINER_KEYS:
+        container = node.get(key)
+        if isinstance(container, dict):
+            for name, value in container.items():
+                _lint_codex_schema_node(value, f"{path}/{key}/{name}", errors)
+
+    for key in _SCHEMA_LIST_KEYS:
+        items = node.get(key)
+        if isinstance(items, list):
+            for index, item in enumerate(items):
+                _lint_codex_schema_node(item, f"{path}/{key}/{index}", errors)
+
+    items = node.get("items")
+    if isinstance(items, dict):
+        _lint_codex_schema_node(items, f"{path}/items", errors)
+    elif isinstance(items, list):
+        for index, item in enumerate(items):
+            _lint_codex_schema_node(item, f"{path}/items/{index}", errors)
+
+    additional = node.get("additionalProperties")
+    if isinstance(additional, dict):
+        _lint_codex_schema_node(additional, f"{path}/additionalProperties", errors)
+
+    for key in ("not", "if", "then", "else"):
+        sub = node.get(key)
+        if isinstance(sub, dict):
+            _lint_codex_schema_node(sub, f"{path}/{key}", errors)
 
 
 def find_codex() -> str | None:
@@ -108,7 +245,7 @@ def complete_structured(
     if not chatgpt_subscription_active():
         raise RuntimeError("Codex is not signed in with a ChatGPT subscription.")
 
-    schema = model_cls.model_json_schema()
+    schema = codex_compatible_json_schema(model_cls.model_json_schema())
     prompt = (
         f"{instructions}\n\n{user}\n\n"
         "Return only the JSON object described by the output schema. "
@@ -144,6 +281,8 @@ def complete_structured(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         assert proc.stdin is not None
         proc.stdin.write(prompt)
