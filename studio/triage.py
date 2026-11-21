@@ -5,33 +5,54 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from studio.codex_backend import complete_structured
+from studio.codex_backend import CODEX_MODEL_EXTRACT, complete_structured
 from studio.schema import TriageTier
 
+TRIAGE_TEXT_MAX_CHARS = 12000
 
-class TriageResult(BaseModel):
-    tier: TriageTier
-    score: int = Field(ge=1, le=5)
-    rationale: str = Field(
-        description="Exactly two sentences explaining the tier and score."
+
+class PaperTriageAudit(BaseModel):
+    triage_tier: TriageTier
+    relevance_score: int = Field(ge=1, le=5)
+    relevance_justification: str = Field(
+        description="How this paper relates to the active research question."
     )
+    core_claim_and_mechanism: str
+    system_and_conditions: str
+    key_findings: str
+    limitations_and_caveats: str
 
 
-TRIAGE_SYSTEM = """You triage a metallurgy paper for a solder/IMC research program.
-Assign one tier: Must Read (Deep Dive), Data Source Only, or Low Priority.
-Score 1-5 (5 = essential). Rationale must be exactly two sentences.
-Do not extract measurements; judge relevance to solder alloying, IMC, and aging."""
+def _triage_system(research_question: str, screening_criteria: str) -> str:
+    criteria_block = ""
+    if screening_criteria.strip():
+        criteria_block = f"\nScreening criteria: {screening_criteria}\n"
+    return f"""You audit a metallurgy paper for an active research program.
+Active research question: {research_question}
+{criteria_block}
+Assign triage_tier: Must Read (Deep Dive), Data Source Only, or Low Priority.
+relevance_score 1-5 (5 = essential). Tie relevance_justification to the research question.
+Fill core_claim_and_mechanism, system_and_conditions, key_findings, limitations_and_caveats.
+Do not extract measurements; analyze relevance and content only."""
 
 
 def run_triage(
     title: str,
-    abstract: Optional[str],
+    text: Optional[str],
+    *,
+    research_question: str,
+    screening_criteria: str = "",
     on_status: Callable[[str], None] | None = None,
-) -> TriageResult:
-    user = f"Title: {title}\n\nAbstract: {abstract or '(none)'}"
+) -> PaperTriageAudit:
+    snippet = (text or "(none)")[:TRIAGE_TEXT_MAX_CHARS]
+    user = f"Title: {title}\n\nText:\n{snippet}"
     parsed = complete_structured(
-        TriageResult, TRIAGE_SYSTEM, user, on_status=on_status
+        PaperTriageAudit,
+        _triage_system(research_question, screening_criteria),
+        user,
+        on_status=on_status,
+        model=CODEX_MODEL_EXTRACT,
     )
-    if not isinstance(parsed, TriageResult):
+    if not isinstance(parsed, PaperTriageAudit):
         raise ValueError("Triage parse failed.")
     return parsed

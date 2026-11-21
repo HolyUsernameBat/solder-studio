@@ -1,6 +1,32 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
+
+_WINDOWS_ILLEGAL = re.compile(r'[<>:"/\\|?*]')
+
+
+def sanitize_windows_filename(name: str) -> str:
+    """Keep the uploaded basename; replace only illegal Windows path characters."""
+    base = Path(name).name
+    cleaned = _WINDOWS_ILLEGAL.sub("-", base)
+    cleaned = cleaned.rstrip(". ").strip()
+    return cleaned or "upload.pdf"
+
+
+def unique_pdf_dest(pdfs_dir: Path, filename: str) -> Path:
+    """Return a path under ``pdfs_dir`` that does not exist; suffix ``-2``, ``-3``, … on collision."""
+    dest = pdfs_dir / filename
+    if not dest.exists():
+        return dest
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix or ".pdf"
+    n = 2
+    while True:
+        candidate = pdfs_dir / f"{stem}-{n}{suffix}"
+        if not candidate.exists():
+            return candidate
+        n += 1
 
 
 def list_folder_pdfs(pdfs_dir: Path) -> list[str]:

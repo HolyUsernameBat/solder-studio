@@ -1,35 +1,18 @@
 from pathlib import Path
 
-from studio.pdfs_folder import (
-    is_pdf_path_stored,
-    list_folder_pdfs,
-    stored_pdf_paths,
-    title_from_pdf_filename,
-)
+from studio.pdfs_folder import sanitize_windows_filename, unique_pdf_dest
 
 
-def test_list_folder_pdfs_sorted(tmp_path: Path):
+def test_sanitize_windows_filename_keeps_basename():
+    assert sanitize_windows_filename(r"foo\bar:illegal?.pdf") == "bar-illegal-.pdf"
+
+
+def test_existing_pdf_paths_not_renamed_by_unique_dest(tmp_path: Path):
     pdfs = tmp_path / "pdfs"
     pdfs.mkdir()
-    (pdfs / "zebra.pdf").write_bytes(b"%PDF-1.4")
-    (pdfs / "alpha.pdf").write_bytes(b"%PDF-1.4")
-    assert list_folder_pdfs(pdfs) == ["alpha.pdf", "zebra.pdf"]
-
-
-def test_is_pdf_path_stored_recognizes_linked_filename():
-    paths = {"existing.pdf", "other.pdf"}
-    assert is_pdf_path_stored("existing.pdf", paths)
-    assert not is_pdf_path_stored("new-drop.pdf", paths)
-
-
-def test_stored_pdf_paths_from_papers():
-    papers = [
-        {"id": 1, "pdf_path": "a.pdf"},
-        {"id": 2, "pdf_path": None},
-        {"id": 3, "pdf_path": "b.pdf"},
-    ]
-    assert stored_pdf_paths(papers) == {"a.pdf", "b.pdf"}
-
-
-def test_title_from_pdf_filename():
-    assert title_from_pdf_filename("my-paper copy.pdf") == "my-paper copy"
+    legacy = pdfs / "W2951296256-the-role-of-intermetallic-compounds-in-controlling-the.pdf"
+    legacy.write_bytes(b"%PDF-existing")
+    new_path = unique_pdf_dest(pdfs, "Chen-New-download.pdf")
+    new_path.write_bytes(b"%PDF-new")
+    assert legacy.read_bytes() == b"%PDF-existing"
+    assert legacy.name == "W2951296256-the-role-of-intermetallic-compounds-in-controlling-the.pdf"

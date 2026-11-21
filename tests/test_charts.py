@@ -1,54 +1,61 @@
 import pandas as pd
 
-from studio.charts import rows_to_dataframe, shear_mpa_chart_frame, uts_chart_frame
-from studio.schema import ShearUnit, SolderRow
+from studio.charts import (
+    plotter_metric_options,
+    rows_to_dataframe,
+    y_options_matching_x_unit,
+)
+from studio.schema import MeasurementRow, SourceSection
 
 
-def test_shear_chart_excludes_newtons_includes_mpa():
+def test_plotter_y_options_match_x_unit_only():
     rows = [
-        SolderRow(
-            imc_thickness_um=3.0,
-            shear_value=45.0,
-            shear_unit=ShearUnit.N,
+        MeasurementRow(
+            metric_name="ball shear",
+            metric_value=45.0,
+            metric_unit="N",
+            source_section=SourceSection.TABLE,
+            verbatim_quote="shear 45 N",
         ),
-        SolderRow(
-            imc_thickness_um=4.0,
-            shear_value=38.0,
-            shear_unit=ShearUnit.MPA,
+        MeasurementRow(
+            metric_name="ball shear",
+            metric_value=38.0,
+            metric_unit="MPa",
+            source_section=SourceSection.TABLE,
+            verbatim_quote="shear 38 MPa",
+        ),
+        MeasurementRow(
+            metric_name="IMC thickness",
+            metric_value=3.0,
+            metric_unit="um",
+            source_section=SourceSection.RESULTS,
+            verbatim_quote="thickness 3.0 um",
+        ),
+        MeasurementRow(
+            metric_name="lap shear",
+            metric_value=41.0,
+            metric_unit="MPa",
+            source_section=SourceSection.TABLE,
+            verbatim_quote="lap shear 41 MPa",
         ),
     ]
     df = rows_to_dataframe(rows)
-    chart = shear_mpa_chart_frame(df)
-    assert len(chart) == 1
-    assert chart.iloc[0]["shear_unit"] == "MPa"
-    assert chart.iloc[0]["shear_value"] == 38.0
+    options = plotter_metric_options(df)
+    mpa_opts = [o for o in options if o[2] == "MPa"]
+    x_name, _, x_unit = mpa_opts[0]
+    y_opts = y_options_matching_x_unit(options, x_unit)
+    assert all(o[2] == "MPa" for o in y_opts)
+    assert not any(o[2] in ("N", "gf") for o in y_opts)
+    n_opts = y_options_matching_x_unit(options, "N")
+    assert n_opts and all(o[2] == "N" for o in n_opts)
 
 
-def test_shear_chart_excludes_gf():
-    rows = [
-        SolderRow(
-            imc_thickness_um=2.5,
-            shear_value=120.0,
-            shear_unit=ShearUnit.GF,
-        ),
-        SolderRow(
-            imc_thickness_um=3.5,
-            shear_value=41.0,
-            shear_unit=ShearUnit.MPA,
-            verbatim_quote="shear 41 MPa",
-        ),
+def test_mixed_units_not_on_same_axis():
+    options = [
+        ("ball shear (N)", "ball shear", "N"),
+        ("ball shear (MPa)", "ball shear", "MPa"),
+        ("lap shear (gf)", "lap shear", "gf"),
     ]
-    df = rows_to_dataframe(rows)
-    chart = shear_mpa_chart_frame(df)
-    assert len(chart) == 1
-    assert chart.iloc[0]["shear_unit"] == "MPa"
-
-
-def test_uts_chart_includes_mpa_pairs():
-    rows = [
-        SolderRow(imc_thickness_um=2.0, uts_mpa=55.0),
-        SolderRow(imc_thickness_um=None, uts_mpa=60.0),
-    ]
-    df = rows_to_dataframe(rows)
-    chart = uts_chart_frame(df)
-    assert len(chart) == 1
+    y_mpa = y_options_matching_x_unit(options, "MPa")
+    assert len(y_mpa) == 1
+    assert y_mpa[0][2] == "MPa"

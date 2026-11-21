@@ -6,9 +6,9 @@ from typing import Callable, Optional
 
 import pdfplumber
 
-from studio.codex_backend import complete_structured
-from studio.quote_gate import filter_rows_quote_gate
-from studio.schema import ExtractionList, SolderRow
+from studio.codex_backend import CODEX_MODEL_EXTRACT, complete_structured
+from studio.quote_gate import filter_rows_gates
+from studio.schema import ExtractionList, MeasurementRow
 
 KEYWORDS = (
     "thickness",
@@ -16,6 +16,10 @@ KEYWORDS = (
     "aging",
     "imc",
     "alloy",
+    "mpa",
+    "tensile",
+    "bismuth",
+    "solder",
 )
 
 
@@ -56,7 +60,6 @@ def tables_as_labeled_text(pdf: pdfplumber.PDF, page_indices: list[int]) -> str:
 
 
 def audit_pdf_text(pdf_path: Path) -> tuple[str, Optional[str]]:
-    """Return (table_text, error_message). error_message set when no usable text."""
     with pdfplumber.open(pdf_path) as pdf:
         indices = select_page_indices(pdf)
         if not indices:
@@ -65,21 +68,12 @@ def audit_pdf_text(pdf_path: Path) -> tuple[str, Optional[str]]:
             )
             if not all_text.strip():
                 return "", "Scanned or empty PDF: no extractable text."
-            return "", "No keyword-matching pages found for extraction."
+            return all_text[:8000], None
 
         labeled = tables_as_labeled_text(pdf, indices)
         if not labeled.strip():
             return "", "Scanned or empty PDF: keyword pages have no table or text."
         return labeled, None
-
-
-EXTRACTION_SYSTEM = """You extract solder joint measurement rows from table text.
-Return only facts present in the text. Use null for missing fields.
-aging_type must be one of: as-reflowed, isothermal, thermal cycling, unspecified.
-imc_phase must be one of: Cu6Sn5, Cu3Sn, mixed, unspecified.
-shear_unit must be one of: MPa, N, gf, unspecified. Do not guess the unit when the paper is silent.
-Each row needs a verbatim_quote copied from the source text that includes every number you set on that row.
-"""
 
 
 PDF_TEXT_CODEX_MAX_CHARS = 12000
@@ -96,16 +90,30 @@ def cap_labeled_text_for_codex(text: str, max_chars: int = PDF_TEXT_CODEX_MAX_CH
     return text[:cut_at].rstrip() + suffix
 
 
-def build_extraction_user_prompt(table_text: str, paper_title: str) -> str:
+def _extraction_system(target_metrics: list[str]) -> str:
+    metrics_line = ", ".join(target_metrics) if target_metrics else "(none specified)"
+    return f"""You extract primary quantitative measurement rows from metallurgy paper text.
+Prioritize target metrics: {metrics_line}. You may also capture other primary experimental numbers.
+Each row needs: material_system, composition_or_variant, processing_or_aging_condition,
+phase_or_microstructure, metric_name, metric_value (number), metric_unit (e.g. um, MPa, N, gf, %),
+sample_size, source_section (Results, Table, Figure, Abstract — never use Introduction for new data),
+source_page, verbatim_quote copied exactly from the source including every number on the row.
+Never extract numbers from Introduction background citations (e.g. Liu et al.13)."""
+
+
+def build_extraction_user_prompt(
+    table_text: str, paper_title: str, research_question: str
+) -> str:
     return f"""Paper: {paper_title}
+Research context: {research_question}
 
 Table and page text:
 {table_text}
 
-Extract all solder measurement rows you can support from this text only."""
+Extract all primary measurement rows you can support from this text only."""
 
 
-def parse_extraction_response(content: str) -> list[SolderRow]:
+def parse_extraction_response(content: str) -> list[MeasurementRow]:
     data = json.loads(content)
     if isinstance(data, dict) and "rows" in data:
         raw_rows = data["rows"]
@@ -113,14 +121,17 @@ def parse_extraction_response(content: str) -> list[SolderRow]:
         raw_rows = data
     else:
         raw_rows = []
-    return [SolderRow.model_validate(r) for r in raw_rows]
+    return [MeasurementRow.model_validate(r) for r in raw_rows]
 
 
 def extract_rows_from_pdf_with_model(
     pdf_path: Path,
     paper_title: str,
+    *,
+    research_question: str,
+    target_metrics: list[str],
     on_status: Callable[[str], None] | None = None,
-) -> tuple[list[SolderRow], Optional[str]]:
+) -> tuple[list[MeasurementRow], Optional[str]]:
     table_text, err = audit_pdf_text(pdf_path)
     if err:
         return [], err
@@ -128,10 +139,11 @@ def extract_rows_from_pdf_with_model(
     capped = cap_labeled_text_for_codex(table_text)
     parsed = complete_structured(
         ExtractionList,
-        EXTRACTION_SYSTEM,
-        build_extraction_user_prompt(capped, paper_title),
+        _extraction_system(target_metrics),
+        build_extraction_user_prompt(capped, paper_title, research_question),
         on_status=on_status,
+        model=CODEX_MODEL_EXTRACT,
     )
     if not isinstance(parsed, ExtractionList):
         return [], "Model returned no parsed extraction."
-    return filter_rows_quote_gate(list(parsed.rows)), None
+    return filter_rows_gates(list(parsed.rows)), None

@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 import requests
 
+from studio.pdfs_folder import unique_pdf_dest
+
 from studio.schema import PaperAudit, PaperCoverage
 
 OPENALEX_WORKS = "https://api.openalex.org/works"
+DEFAULT_OPENALEX_QUERY = "solder IMC shear aging SAC305 bismuth"
 
 
 @dataclass
@@ -119,11 +124,71 @@ def _reconstruct_abstract(inverted_index: Optional[dict]) -> Optional[str]:
     return " ".join(w for _, w in positions)
 
 
+def _ascii_letters_digits(token: str) -> str:
+    normalized = unicodedata.normalize("NFKD", token)
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^A-Za-z0-9]+", "", ascii_text)
+
+
+def _display_name_ends_with_et_al(tokens: list[str]) -> bool:
+    if len(tokens) < 2:
+        return False
+    if tokens[-2].lower() != "et":
+        return False
+    return tokens[-1].lower().rstrip(".") == "al"
+
+
+def first_author_family_name(work: dict[str, Any]) -> str:
+    authorships = work.get("authorships") or []
+    if not authorships:
+        return "Unknown"
+    author = (authorships[0].get("author") or {})
+    display_name = (author.get("display_name") or "").strip()
+    if not display_name:
+        return "Unknown"
+    tokens = display_name.split()
+    if _display_name_ends_with_et_al(tokens) and len(tokens) >= 3:
+        family_token = tokens[0]
+    else:
+        family_token = tokens[-1]
+    safe = _ascii_letters_digits(family_token)
+    return safe or "Unknown"
+
+
+def title_slug_for_pdf(work: dict[str, Any], *, max_chars: int = 60) -> str:
+    raw = (work.get("display_name") or work.get("title") or "Untitled").strip()
+    normalized = unicodedata.normalize("NFKD", raw)
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    words = re.findall(r"[A-Za-z0-9]+", ascii_text)
+    if not words:
+        return "Untitled"
+    parts: list[str] = []
+    length = 0
+    for word in words:
+        add = len(word) if not parts else len(word) + 1
+        if length + add > max_chars and parts:
+            break
+        parts.append(word)
+        length += add
+    slug = "-".join(parts)
+    if len(slug) > max_chars:
+        slug = slug[:max_chars].rstrip("-")
+    return slug or "Untitled"
+
+
+def bibliography_pdf_filename(work: dict[str, Any]) -> str:
+    family = first_author_family_name(work)
+    slug = title_slug_for_pdf(work)
+    return f"{family}_{slug}.pdf"
+
+
 def search_openalex(
     query: str,
     per_page: int = 10,
     session: Optional[requests.Session] = None,
 ) -> list[SearchHit]:
+    if not (query or "").strip():
+        raise ValueError("OpenAlex search query must not be blank.")
     sess = session or requests.Session()
     headers = {"User-Agent": build_user_agent()}
     params = {"search": query, "per_page": per_page}
@@ -144,8 +209,6 @@ def try_fetch_pdf_for_work(
 ) -> tuple[Optional[str], PaperCoverage]:
     locations = work_pdf_locations(work)
     urls = pdf_urls_from_locations(locations)
-    openalex_id = work.get("id") or "unknown"
-    safe_id = openalex_id.rsplit("/", 1)[-1].replace("/", "_")
     for url in urls:
         try:
             body = download_pdf_candidate(url, session=session)
@@ -153,7 +216,7 @@ def try_fetch_pdf_for_work(
             continue
         if body is None:
             continue
-        dest = pdfs_dir / f"{safe_id}.pdf"
+        dest = unique_pdf_dest(pdfs_dir, bibliography_pdf_filename(work))
         save_pdf(body, dest)
         return str(dest.name), PaperCoverage.FULL_TEXT
     return None, PaperCoverage.ABSTRACT_ONLY

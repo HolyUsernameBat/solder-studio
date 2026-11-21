@@ -3,26 +3,24 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-from studio.schema import SolderRow
+from studio.schema import MeasurementRow, SourceSection
 
-_NUMERIC_FIELDS = (
-    "addition_weight_percent",
-    "reflow_temp_c",
-    "imc_thickness_um",
-    "shear_value",
-    "uts_mpa",
-    "elongation_percent",
+_CITATION_BACKGROUND = re.compile(
+    r"et\s+al\.?\s*\d+",
+    re.IGNORECASE,
+)
+_CITATION_SECTION = re.compile(
+    r"\b(background|cited|literature|reference)\b",
+    re.IGNORECASE,
 )
 
 
 def collapse_quote_whitespace(quote: str) -> str:
-    """Remove newlines, then collapse remaining whitespace before matching."""
     flattened = quote.replace("\r\n", "").replace("\r", "").replace("\n", "")
     return re.sub(r"[ \t]+", " ", flattened).strip()
 
 
 def _format_number(value: float) -> list[str]:
-    """Variants that might appear in a quote."""
     variants = []
     if value == int(value):
         variants.append(str(int(value)))
@@ -33,13 +31,10 @@ def _format_number(value: float) -> list[str]:
     return variants
 
 
-def numeric_measurements_on_row(row: SolderRow) -> list[float]:
-    values: list[float] = []
-    for field in _NUMERIC_FIELDS:
-        v = getattr(row, field)
-        if v is not None:
-            values.append(float(v))
-    return values
+def numeric_measurements_on_row(row: MeasurementRow) -> list[float]:
+    if row.metric_value is None:
+        return []
+    return [float(row.metric_value)]
 
 
 def number_in_quote(value: float, quote: Optional[str]) -> bool:
@@ -49,19 +44,14 @@ def number_in_quote(value: float, quote: Optional[str]) -> bool:
     for variant in _format_number(value):
         if variant in text:
             return True
-        # Match center value inside an error bar, e.g. 42.3 ± 3.1
         err_pattern = re.escape(variant) + r"\s*[±]\s*[\d.]+"
         if re.search(err_pattern, text):
             return True
-    return _fuzzy_number_in_quote(value, text)
-
-
-def _fuzzy_number_in_quote(value: float, quote: str) -> bool:
     pattern = re.escape(f"{value:g}")
-    return re.search(pattern, quote) is not None
+    return re.search(pattern, text) is not None
 
 
-def row_passes_quote_gate(row: SolderRow) -> bool:
+def row_passes_quote_gate(row: MeasurementRow) -> bool:
     quote = row.verbatim_quote
     nums = numeric_measurements_on_row(row)
     if not nums:
@@ -69,5 +59,34 @@ def row_passes_quote_gate(row: SolderRow) -> bool:
     return all(number_in_quote(n, quote) for n in nums)
 
 
-def filter_rows_quote_gate(rows: list[SolderRow]) -> list[SolderRow]:
-    return [r for r in rows if row_passes_quote_gate(r)]
+def is_background_citation_row(row: MeasurementRow) -> bool:
+    quote = row.verbatim_quote or ""
+    section = row.source_section.value if row.source_section else ""
+    if _CITATION_BACKGROUND.search(quote):
+        return True
+    if section and _CITATION_SECTION.search(section):
+        return True
+    return False
+
+
+def row_passes_source_gate(row: MeasurementRow) -> bool:
+    if row.metric_value is None:
+        return False
+    if row.source_section == SourceSection.INTRODUCTION:
+        return False
+    if is_background_citation_row(row):
+        return False
+    return True
+
+
+def row_passes_all_gates(row: MeasurementRow) -> bool:
+    return row_passes_source_gate(row) and row_passes_quote_gate(row)
+
+
+def filter_rows_gates(rows: list[MeasurementRow]) -> list[MeasurementRow]:
+    return [r for r in rows if row_passes_all_gates(r)]
+
+
+# Back-compat alias used by pdf_tables
+def filter_rows_quote_gate(rows: list[MeasurementRow]) -> list[MeasurementRow]:
+    return filter_rows_gates(rows)

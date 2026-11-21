@@ -1,3 +1,7 @@
+from unittest.mock import MagicMock
+
+import pytest
+
 from studio.openalex import (
     build_user_agent,
     download_pdf_candidate,
@@ -7,6 +11,14 @@ from studio.openalex import (
     try_fetch_pdf_for_work,
     work_pdf_locations,
 )
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+def test_search_openalex_blank_query_does_not_hit_network(blank: str):
+    session = MagicMock()
+    with pytest.raises(ValueError, match="must not be blank"):
+        search_openalex(blank, session=session)
+    session.get.assert_not_called()
 
 
 def test_user_agent_is_solder_studio_without_email():

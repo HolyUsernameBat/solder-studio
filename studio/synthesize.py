@@ -10,35 +10,29 @@ from studio.briefing_html import (
     markdown_findings_to_html,
     render_briefing_html,
 )
-from studio.codex_backend import complete_structured
-from studio.quote_gate import row_passes_quote_gate
+from studio.codex_backend import CODEX_MODEL_SYNTH, complete_structured
+from studio.quote_gate import row_passes_all_gates
 from studio.schema import (
     BriefingDocument,
-    ImcChemistLensOutput,
+    InterfaceMechanismsLensOutput,
     LensClaim,
+    MeasurementRow,
     MetallurgistLensOutput,
     ReliabilitySkepticLensOutput,
-    SolderRow,
 )
 
 MIN_QUOTED_ROWS = 3
 
-BENCHMARK_QUESTION = (
-    "How do minor alloying additions (Bi, Ni, Sb, or nanoparticles) suppress "
-    "Cu–Sn intermetallic growth and brittle interfacial fracture in Sn-Bi and "
-    "doped SAC305 during thermal aging?"
-)
-
 LENS_PHYSICAL = "Physical Metallurgist"
-LENS_IMC = "Interface and IMC Chemist"
+LENS_INTERFACE = "Interface & Mechanisms Specialist"
 LENS_SKEPTIC = "Reliability Skeptic"
 
 
-def quoted_rows(rows: list[SolderRow]) -> list[SolderRow]:
-    return [r for r in rows if r.verbatim_quote and row_passes_quote_gate(r)]
+def quoted_rows(rows: list[MeasurementRow]) -> list[MeasurementRow]:
+    return [r for r in rows if r.verbatim_quote and row_passes_all_gates(r)]
 
 
-def stop_message_if_insufficient(rows: list[SolderRow]) -> Optional[str]:
+def stop_message_if_insufficient(rows: list[MeasurementRow]) -> Optional[str]:
     q = quoted_rows(rows)
     n = len(q)
     if n >= MIN_QUOTED_ROWS:
@@ -51,7 +45,7 @@ def stop_message_if_insufficient(rows: list[SolderRow]) -> Optional[str]:
     )
 
 
-def _paper_title(paper_titles: dict[int, str] | None, row: SolderRow) -> str:
+def _paper_title(paper_titles: dict[int, str] | None, row: MeasurementRow) -> str:
     titles = paper_titles or {}
     if row.paper_id is not None:
         return titles.get(row.paper_id, "Unknown paper")
@@ -59,7 +53,7 @@ def _paper_title(paper_titles: dict[int, str] | None, row: SolderRow) -> str:
 
 
 def rows_to_prompt_block(
-    rows: list[SolderRow],
+    rows: list[MeasurementRow],
     paper_titles: dict[int, str] | None = None,
 ) -> str:
     lines: list[str] = []
@@ -70,22 +64,22 @@ def rows_to_prompt_block(
             f"  paper_title: {title!r}",
             f"  source_page: {r.source_page}",
             f'  verbatim_quote: "{r.verbatim_quote}"',
-            f"  alloy: {r.alloy!r}",
-            f"  addition_name: {r.addition_name!r}, addition_weight_percent: {r.addition_weight_percent}",
-            f"  substrate: {r.substrate!r}, reflow_temp_c: {r.reflow_temp_c}",
-            f"  aging_condition: {r.aging_condition!r}, aging_type: {r.aging_type.value}",
-            f"  imc_phase: {r.imc_phase.value}, imc_thickness_um: {r.imc_thickness_um}",
-            f"  shear_value: {r.shear_value}, shear_unit: {r.shear_unit.value}",
-            f"  uts_mpa: {r.uts_mpa}, elongation_percent: {r.elongation_percent}",
-            f"  fracture_mode: {r.fracture_mode!r}, sample_size: {r.sample_size!r}",
+            f"  material_system: {r.material_system!r}",
+            f"  composition_or_variant: {r.composition_or_variant!r}",
+            f"  processing_or_aging_condition: {r.processing_or_aging_condition!r}",
+            f"  phase_or_microstructure: {r.phase_or_microstructure!r}",
+            f"  metric_name: {r.metric_name!r}",
+            f"  metric_value: {r.metric_value}, metric_unit: {r.metric_unit!r}",
+            f"  sample_size: {r.sample_size!r}",
+            f"  source_section: {r.source_section.value if r.source_section else None}",
         ]
         lines.append("\n".join(parts))
     return "\n\n".join(lines)
 
 
-def _lens_system(lens_name: str, extra: str) -> str:
+def _lens_system(lens_name: str, research_question: str, extra: str) -> str:
     return f"""You are the {lens_name} lens for a metallurgy briefing.
-Benchmark: {BENCHMARK_QUESTION}
+Research question: {research_question}
 
 You see ONLY the quote-verified rows supplied. Each claim MUST include paper_title, source_page,
 and verbatim_quote copied exactly from a row. Omit any claim you cannot tie to a row.
@@ -97,7 +91,7 @@ and verbatim_quote copied exactly from a row. Omit any claim you cannot tie to a
 PHYSICAL_EXTRA = (
     "Focus on bulk solder microstructure, phase evolution, and mechanical trends tied to aging."
 )
-IMC_EXTRA = (
+INTERFACE_EXTRA = (
     "Focus on interface reactions, IMC phase identity, thickness trends, and chemistry."
 )
 SKEPTIC_EXTRA = (
@@ -107,7 +101,7 @@ SKEPTIC_EXTRA = (
 
 
 def build_synthesis_user_prompt(
-    rows: list[SolderRow],
+    rows: list[MeasurementRow],
     paper_titles: dict[int, str] | None = None,
 ) -> str:
     return (
@@ -123,29 +117,37 @@ CompleteFn = Callable[..., Any]
 @dataclass
 class LensBundle:
     physical: MetallurgistLensOutput
-    imc: ImcChemistLensOutput
+    interface: InterfaceMechanismsLensOutput
     skeptic: ReliabilitySkepticLensOutput
 
 
 def _call_lens(
     model_cls: type,
     lens_name: str,
+    research_question: str,
     extra: str,
-    rows: list[SolderRow],
+    rows: list[MeasurementRow],
     paper_titles: dict[int, str] | None,
     complete: CompleteFn,
     on_status: Callable[[str], None] | None = None,
 ) -> Any:
-    instructions = _lens_system(lens_name, extra)
+    instructions = _lens_system(lens_name, research_question, extra)
     user = build_synthesis_user_prompt(rows, paper_titles)
-    parsed = complete(model_cls, instructions, user, on_status=on_status)
+    parsed = complete(
+        model_cls,
+        instructions,
+        user,
+        on_status=on_status,
+        model=CODEX_MODEL_SYNTH,
+    )
     if not isinstance(parsed, model_cls):
         raise RuntimeError(f"{lens_name} returned no parsed output.")
     return parsed
 
 
 def run_lens_calls(
-    rows: list[SolderRow],
+    rows: list[MeasurementRow],
+    research_question: str,
     paper_titles: dict[int, str] | None = None,
     complete: CompleteFn | None = None,
     on_status: Callable[[str], None] | None = None,
@@ -154,16 +156,18 @@ def run_lens_calls(
     physical = _call_lens(
         MetallurgistLensOutput,
         LENS_PHYSICAL,
+        research_question,
         PHYSICAL_EXTRA,
         rows,
         paper_titles,
         complete_fn,
         on_status=on_status,
     )
-    imc = _call_lens(
-        ImcChemistLensOutput,
-        LENS_IMC,
-        IMC_EXTRA,
+    interface = _call_lens(
+        InterfaceMechanismsLensOutput,
+        LENS_INTERFACE,
+        research_question,
+        INTERFACE_EXTRA,
         rows,
         paper_titles,
         complete_fn,
@@ -172,48 +176,53 @@ def run_lens_calls(
     skeptic = _call_lens(
         ReliabilitySkepticLensOutput,
         LENS_SKEPTIC,
+        research_question,
         SKEPTIC_EXTRA,
         rows,
         paper_titles,
         complete_fn,
         on_status=on_status,
     )
-    return LensBundle(physical=physical, imc=imc, skeptic=skeptic)
+    return LensBundle(physical=physical, interface=interface, skeptic=skeptic)
 
 
 def _contradictions_across_rows(
-    rows: list[SolderRow],
+    rows: list[MeasurementRow],
     paper_titles: dict[int, str] | None,
 ) -> list[str]:
     notes: list[str] = []
-    for i, a in enumerate(rows):
-        for b in rows[i + 1 :]:
-            if a.imc_thickness_um is None or b.imc_thickness_um is None:
-                continue
-            if a.shear_value is None or b.shear_value is None:
-                continue
-            if a.shear_unit != b.shear_unit and a.shear_unit.value != b.shear_unit.value:
-                continue
-            spread = abs(float(a.shear_value) - float(b.shear_value))
-            if spread < max(5.0, 0.2 * max(float(a.shear_value), float(b.shear_value))):
-                continue
-            ta = _paper_title(paper_titles, a)
-            tb = _paper_title(paper_titles, b)
-            notes.append(
-                f"Shear reports diverge: {ta} p.{a.source_page} vs {tb} p.{b.source_page} "
-                f"({a.shear_value} {a.shear_unit.value} vs {b.shear_value} {b.shear_unit.value})."
-            )
+    by_metric: dict[tuple[str, str | None], list[MeasurementRow]] = {}
+    for r in rows:
+        if r.metric_name and r.metric_unit and r.metric_value is not None:
+            key = (r.metric_name, r.metric_unit)
+            by_metric.setdefault(key, []).append(r)
+    for (name, unit), group in by_metric.items():
+        if len(group) < 2:
+            continue
+        vals = [float(g.metric_value) for g in group if g.metric_value is not None]
+        if len(vals) < 2:
+            continue
+        spread = max(vals) - min(vals)
+        if spread < max(5.0, 0.2 * max(vals)):
+            continue
+        a, b = group[0], group[1]
+        ta = _paper_title(paper_titles, a)
+        tb = _paper_title(paper_titles, b)
+        notes.append(
+            f"{name} ({unit}) diverges: {ta} p.{a.source_page} ({a.metric_value}) "
+            f"vs {tb} p.{b.source_page} ({b.metric_value})."
+        )
     return notes
 
 
 def _executive_summary(bundle: LensBundle) -> str:
     settled = (
         bundle.physical.settled_observations
-        + bundle.imc.settled_observations
+        + bundle.interface.settled_observations
     )
     contested = (
         bundle.physical.contested_observations
-        + bundle.imc.contested_observations
+        + bundle.interface.contested_observations
         + [c.statement for c in bundle.skeptic.claims]
     )
     lines = ["Settled signals:"]
@@ -244,15 +253,15 @@ def _findings_markdown(bundle: LensBundle) -> str:
             sections.append("- No cited findings returned.")
 
     section(LENS_PHYSICAL, bundle.physical.claims, bundle.physical.contested_observations)
-    section(LENS_IMC, bundle.imc.claims, bundle.imc.contested_observations)
+    section(LENS_INTERFACE, bundle.interface.claims, bundle.interface.contested_observations)
     section(LENS_SKEPTIC, bundle.skeptic.claims, [])
     return "\n".join(sections)
 
 
 def _gaps_markdown(bundle: LensBundle) -> str:
-    gaps = bundle.physical.uncaptured_by_table + bundle.imc.uncaptured_by_table
+    gaps = bundle.physical.uncaptured_by_table + bundle.interface.uncaptured_by_table
     if not gaps:
-        return "No table gaps noted by the metallurgy or IMC lenses."
+        return "No table gaps noted by the metallurgy or interface lenses."
     return "\n".join(f"- {g}" for g in gaps)
 
 
@@ -279,7 +288,7 @@ def _buckets_markdown(skeptic: ReliabilitySkepticLensOutput) -> str:
 
 def assemble_briefing(
     bundle: LensBundle,
-    rows: list[SolderRow],
+    rows: list[MeasurementRow],
     paper_titles: dict[int, str] | None = None,
 ) -> BriefingDocument:
     executive = _executive_summary(bundle)
@@ -305,7 +314,10 @@ def assemble_briefing(
         else f"<p>{html.escape(contradictions_md, quote=True)}</p>"
     )
     gaps_html = markdown_findings_to_html(
-        "\n".join(f"- {g}" for g in (bundle.physical.uncaptured_by_table + bundle.imc.uncaptured_by_table))
+        "\n".join(
+            f"- {g}"
+            for g in (bundle.physical.uncaptured_by_table + bundle.interface.uncaptured_by_table)
+        )
         or "- None."
     )
     buckets_html = (
@@ -327,7 +339,6 @@ def assemble_briefing(
         buckets_markdown=buckets_md,
         html="",
     )
-    # Screen HTML fragments stored in markdown fields for streamlit; full doc HTML for download.
     doc.html = render_briefing_html(
         BriefingDocument(
             executive_summary=executive,
@@ -342,22 +353,23 @@ def assemble_briefing(
 
 
 def run_synthesis(
-    rows: list[SolderRow],
+    rows: list[MeasurementRow],
+    research_question: str,
     paper_titles: dict[int, str] | None = None,
     complete: CompleteFn | None = None,
     on_status: Callable[[str], None] | None = None,
-) -> tuple[Optional[BriefingDocument], Optional[str], list[SolderRow]]:
-    """
-    Returns (briefing, stop_message, rows_used).
-    If stop_message is set, briefing is None and Codex is not called.
-    """
+) -> tuple[Optional[BriefingDocument], Optional[str], list[MeasurementRow]]:
     usable = quoted_rows(rows)
     stop = stop_message_if_insufficient(rows)
     if stop:
         return None, stop, usable
 
     bundle = run_lens_calls(
-        usable, paper_titles, complete=complete, on_status=on_status
+        usable,
+        research_question,
+        paper_titles,
+        complete=complete,
+        on_status=on_status,
     )
     briefing = assemble_briefing(bundle, usable, paper_titles)
     return briefing, None, usable

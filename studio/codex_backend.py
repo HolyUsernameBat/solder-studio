@@ -21,6 +21,10 @@ CODEX_CANDIDATES = (
 CODEX_EXEC_TIMEOUT_SECONDS = 12 * 60
 STATUS_TEXT_MAX = 160
 
+# From this machine's `codex debug models` catalog (visibility=list), Nov 2026.
+CODEX_MODEL_EXTRACT = "gpt-6.2-sol"  # paper audit + measurement extraction
+CODEX_MODEL_SYNTH = "gpt-6-luna"  # three synthesis lenses
+
 _SCHEMA_CONTAINER_KEYS = (
     "properties",
     "patternProperties",
@@ -217,6 +221,43 @@ def status_from_event(obj: dict) -> str | None:
     return None
 
 
+def build_codex_exec_argv(
+    executable: str,
+    *,
+    schema_path: Path,
+    output_path: Path,
+    work_dir: Path,
+    model: str | None = None,
+) -> list[str]:
+    """Argv for `codex exec` structured output; optional ``-m`` when model is set."""
+    argv: list[str] = [
+        executable,
+        "exec",
+    ]
+    if model is not None:
+        argv.extend(["-m", model])
+    argv.extend(
+        [
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--sandbox",
+            "read-only",
+            "--color",
+            "never",
+            "--ignore-user-config",
+            "--json",
+            "--output-schema",
+            str(schema_path),
+            "-o",
+            str(output_path),
+            "-C",
+            str(work_dir),
+            "-",
+        ]
+    )
+    return argv
+
+
 def _handle_stdout_line(line: str, on_status: Callable[[str], None] | None) -> None:
     if on_status is None:
         return
@@ -238,6 +279,8 @@ def complete_structured(
     instructions: str,
     user: str,
     on_status: Callable[[str], None] | None = None,
+    *,
+    model: str | None = None,
 ) -> BaseModel:
     executable = find_codex()
     if not executable:
@@ -258,25 +301,13 @@ def complete_structured(
         schema_path.write_text(json.dumps(schema), encoding="utf-8")
         deadline = time.monotonic() + CODEX_EXEC_TIMEOUT_SECONDS
         proc = subprocess.Popen(
-            [
+            build_codex_exec_argv(
                 executable,
-                "exec",
-                "--skip-git-repo-check",
-                "--ephemeral",
-                "--sandbox",
-                "read-only",
-                "--color",
-                "never",
-                "--ignore-user-config",
-                "--json",
-                "--output-schema",
-                str(schema_path),
-                "-o",
-                str(output_path),
-                "-C",
-                str(root),
-                "-",
-            ],
+                schema_path=schema_path,
+                output_path=output_path,
+                work_dir=root,
+                model=model,
+            ),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
