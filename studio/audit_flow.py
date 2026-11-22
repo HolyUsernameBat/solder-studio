@@ -6,8 +6,22 @@ from typing import Optional
 
 from studio import db
 from studio.pdf_tables import audit_pdf_text, extract_rows_from_pdf_with_model
-from studio.schema import PaperCoverage
+from studio.schema import PaperCoverage, TriageTier
 from studio.triage import run_triage
+
+NOT_YET_TRIAGED = "Not yet triaged"
+
+TRIAGE_FILTER_ALL = "All"
+QUEUE_ORDER_LIBRARY = "Library order"
+QUEUE_ORDER_MUST_READ_FIRST = "Must Read first"
+TAG_FILTER_ALL = "All tags"
+
+_TRIAGE_SORT_RANK: dict[str, int] = {
+    TriageTier.MUST_READ.value: 0,
+    TriageTier.DATA_SOURCE.value: 1,
+    TriageTier.LOW_PRIORITY.value: 2,
+    NOT_YET_TRIAGED: 3,
+}
 
 def research_question_select_label(
     question_id: int, research_question: str, *, preview_chars: int | None = None
@@ -41,11 +55,101 @@ def eligible_queued_audit_paper_ids(
 def queue_papers_for_display(
     papers: Sequence[dict], pdfs_dir: Path, hide_abstract_only: bool
 ) -> list[dict]:
-    """Papers shown in Select paper and batch-audit lists."""
+    """Papers shown in Select paper and batch-audit lists (hide-abstract-only step only)."""
     if not hide_abstract_only:
         return list(papers)
     eligible = set(eligible_queued_audit_paper_ids(papers, pdfs_dir))
     return [p for p in papers if int(p["id"]) in eligible]
+
+
+def parse_comma_separated_tags(text: str) -> list[str]:
+    """Split comma-separated tags; strip; drop empties; preserve case."""
+    return [part.strip() for part in (text or "").split(",") if part.strip()]
+
+
+def effective_triage_tier(paper: dict) -> str:
+    tier = paper.get("triage_tier")
+    if tier is None or str(tier).strip() == "":
+        return NOT_YET_TRIAGED
+    return str(tier)
+
+
+def _paper_relevance_score(paper: dict) -> Optional[int]:
+    val = paper.get("triage_score")
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def filter_queue_by_triage(
+    papers: Sequence[dict], triage_filter: str
+) -> list[dict]:
+    if triage_filter == TRIAGE_FILTER_ALL:
+        return list(papers)
+    if triage_filter == NOT_YET_TRIAGED:
+        return [p for p in papers if effective_triage_tier(p) == NOT_YET_TRIAGED]
+    return [p for p in papers if p.get("triage_tier") == triage_filter]
+
+
+def filter_queue_by_relevance_gt_2(
+    papers: Sequence[dict], only_gt_2: bool
+) -> list[dict]:
+    if not only_gt_2:
+        return list(papers)
+    out: list[dict] = []
+    for p in papers:
+        score = _paper_relevance_score(p)
+        if score is not None and score > 2:
+            out.append(p)
+    return out
+
+
+def filter_queue_by_tag(
+    papers: Sequence[dict],
+    tag_filter: str,
+    tags_by_paper_id: dict[int, list[str]],
+) -> list[dict]:
+    if tag_filter == TAG_FILTER_ALL:
+        return list(papers)
+    out: list[dict] = []
+    for p in papers:
+        pid = int(p["id"])
+        if tag_filter in tags_by_paper_id.get(pid, []):
+            out.append(p)
+    return out
+
+
+def sort_queue_papers(papers: Sequence[dict], order: str) -> list[dict]:
+    if order != QUEUE_ORDER_MUST_READ_FIRST:
+        return list(papers)
+    indexed = list(enumerate(papers))
+
+    def rank(p: dict) -> int:
+        tier = effective_triage_tier(p)
+        return _TRIAGE_SORT_RANK.get(tier, _TRIAGE_SORT_RANK[NOT_YET_TRIAGED])
+
+    indexed.sort(key=lambda pair: (rank(pair[1]), pair[0]))
+    return [p for _, p in indexed]
+
+
+def apply_queue_paper_filters(
+    papers: Sequence[dict],
+    *,
+    triage_filter: str = TRIAGE_FILTER_ALL,
+    only_relevance_gt_2: bool = False,
+    order: str = QUEUE_ORDER_LIBRARY,
+    tag_filter: str = TAG_FILTER_ALL,
+    tags_by_paper_id: dict[int, list[str]] | None = None,
+) -> list[dict]:
+    """Triage, relevance, tag filters and optional tier sort after hide-abstract-only."""
+    tags_map = tags_by_paper_id or {}
+    step = filter_queue_by_triage(papers, triage_filter)
+    step = filter_queue_by_relevance_gt_2(step, only_relevance_gt_2)
+    step = filter_queue_by_tag(step, tag_filter, tags_map)
+    return sort_queue_papers(step, order)
 
 
 def paper_ids_for_selected_audit(

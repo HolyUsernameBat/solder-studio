@@ -265,6 +265,13 @@ def init_db(base: Path) -> int:
                 FOREIGN KEY (question_id) REFERENCES research_questions(question_id),
                 FOREIGN KEY (paper_id) REFERENCES papers(id)
             );
+
+            CREATE TABLE IF NOT EXISTS paper_tags (
+                paper_id INTEGER NOT NULL,
+                tag TEXT NOT NULL,
+                PRIMARY KEY (paper_id, tag),
+                FOREIGN KEY (paper_id) REFERENCES papers(id)
+            );
             """
         )
         for col in (
@@ -693,6 +700,65 @@ def get_paper(base: Path, paper_id: int) -> Optional[dict]:
     with connect(base) as conn:
         row = conn.execute("SELECT * FROM papers WHERE id = ?", (paper_id,)).fetchone()
     return dict(row) if row else None
+
+
+def list_tags_for_paper(base: Path, paper_id: int) -> list[str]:
+    with connect(base) as conn:
+        rows = conn.execute(
+            "SELECT tag FROM paper_tags WHERE paper_id = ? ORDER BY tag COLLATE NOCASE",
+            (paper_id,),
+        ).fetchall()
+    return [str(r["tag"]) for r in rows]
+
+
+def list_distinct_tags_for_project(base: Path, project_id: int) -> list[str]:
+    with connect(base) as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT pt.tag
+            FROM paper_tags pt
+            INNER JOIN papers p ON p.id = pt.paper_id
+            WHERE p.project_id = ?
+            ORDER BY pt.tag COLLATE NOCASE
+            """,
+            (project_id,),
+        ).fetchall()
+    return [str(r["tag"]) for r in rows]
+
+
+def tags_by_paper_for_project(base: Path, project_id: int) -> dict[int, list[str]]:
+    with connect(base) as conn:
+        rows = conn.execute(
+            """
+            SELECT pt.paper_id, pt.tag
+            FROM paper_tags pt
+            INNER JOIN papers p ON p.id = pt.paper_id
+            WHERE p.project_id = ?
+            """,
+            (project_id,),
+        ).fetchall()
+    out: dict[int, list[str]] = {}
+    for r in rows:
+        pid = int(r["paper_id"])
+        out.setdefault(pid, []).append(str(r["tag"]))
+    return out
+
+
+def replace_tags_for_paper(base: Path, paper_id: int, tags: list[str]) -> None:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for tag in tags:
+        if tag in seen:
+            continue
+        seen.add(tag)
+        unique.append(tag)
+    with connect(base) as conn:
+        conn.execute("DELETE FROM paper_tags WHERE paper_id = ?", (paper_id,))
+        for tag in unique:
+            conn.execute(
+                "INSERT INTO paper_tags (paper_id, tag) VALUES (?, ?)",
+                (paper_id, tag),
+            )
 
 
 def _row_to_measurement(r: sqlite3.Row) -> MeasurementRow:

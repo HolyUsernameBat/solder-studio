@@ -10,10 +10,17 @@ import streamlit as st
 
 from studio import db
 from studio.audit_flow import (
+    NOT_YET_TRIAGED,
+    QUEUE_ORDER_LIBRARY,
+    QUEUE_ORDER_MUST_READ_FIRST,
+    TAG_FILTER_ALL,
+    TRIAGE_FILTER_ALL,
     active_research_question_display,
+    apply_queue_paper_filters,
     eligible_queued_audit_paper_ids,
     paper_ids_for_audit_all,
     paper_ids_for_selected_audit,
+    parse_comma_separated_tags,
     queue_papers_for_display,
     research_question_select_label,
     run_extract_and_triage,
@@ -35,7 +42,7 @@ from studio.pdfs_folder import (
     title_from_pdf_filename,
     unique_pdf_dest,
 )
-from studio.schema import PaperCoverage
+from studio.schema import PaperCoverage, TriageTier
 from studio.synthesize import run_synthesis
 from studio.triage import run_triage
 
@@ -555,12 +562,56 @@ with tab_search:
     if not papers:
         st.info("No papers yet for this project. Search above, or audit a PDF from the folder.")
     else:
-        queue_papers = queue_papers_for_display(papers, PDFS_DIR, hide_abstract_only)
-        if hide_abstract_only and not queue_papers:
-            st.info(
-                "Abstract-only papers are hidden. Uncheck **Hide abstract-only** to triage them."
+        tag_options = [TAG_FILTER_ALL] + db.list_distinct_tags_for_project(
+            CODE_ROOT, pid
+        )
+        triage_options = [
+            TRIAGE_FILTER_ALL,
+            TriageTier.MUST_READ.value,
+            TriageTier.DATA_SOURCE.value,
+            TriageTier.LOW_PRIORITY.value,
+            NOT_YET_TRIAGED,
+        ]
+        order_options = [QUEUE_ORDER_LIBRARY, QUEUE_ORDER_MUST_READ_FIRST]
+        f1, f2, f3, f4 = st.columns(4)
+        with f1:
+            triage_filter = st.selectbox(
+                "Triage", triage_options, index=0, key="queue_triage_filter"
             )
-        else:
+        with f2:
+            only_relevance_gt_2 = st.checkbox(
+                "Only relevance > 2", value=False, key="queue_relevance_gt_2"
+            )
+        with f3:
+            order_filter = st.selectbox(
+                "Order", order_options, index=0, key="queue_order_filter"
+            )
+        with f4:
+            tag_filter = st.selectbox(
+                "Tag", tag_options, index=0, key="queue_tag_filter"
+            )
+
+        tags_by_paper = db.tags_by_paper_for_project(CODE_ROOT, pid)
+        after_hide = queue_papers_for_display(papers, PDFS_DIR, hide_abstract_only)
+        queue_papers = apply_queue_paper_filters(
+            after_hide,
+            triage_filter=triage_filter,
+            only_relevance_gt_2=only_relevance_gt_2,
+            order=order_filter,
+            tag_filter=tag_filter,
+            tags_by_paper_id=tags_by_paper,
+        )
+        if not queue_papers:
+            if hide_abstract_only and not after_hide:
+                st.info(
+                    "Abstract-only papers are hidden. Uncheck **Hide abstract-only** to triage them."
+                )
+            else:
+                st.info(
+                    "No papers match the current filters. Loosen **Triage**, "
+                    "**Only relevance > 2**, **Tag**, or **Order**."
+                )
+        if queue_papers:
             papers_by_id = {int(p["id"]): p for p in papers}
             eligible_ids = eligible_queued_audit_paper_ids(papers, PDFS_DIR)
             if eligible_ids:
@@ -637,6 +688,20 @@ with tab_search:
             p = queue_papers[picked]
             st.markdown(f"### {p['title']}")
             st.write(f"Coverage: **{p['coverage']}**")
+            saved_tags = db.list_tags_for_paper(CODE_ROOT, int(p["id"]))
+            tags_value = ", ".join(saved_tags)
+            tags_input = st.text_input(
+                "Tags (comma-separated)",
+                value=tags_value,
+                key=f"paper_tags_input_{p['id']}",
+            )
+            if st.button("Save tags", key=f"save_paper_tags_{p['id']}"):
+                db.replace_tags_for_paper(
+                    CODE_ROOT,
+                    int(p["id"]),
+                    parse_comma_separated_tags(tags_input),
+                )
+                st.rerun()
             if p.get("pdf_path"):
                 st.write(f"PDF: `{p['pdf_path']}`")
                 if st.button("Open PDF", key=f"open_pdf_{p['id']}"):

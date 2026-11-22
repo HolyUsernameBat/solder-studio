@@ -22,6 +22,23 @@ def db_root(tmp_path: Path) -> Path:
     return tmp_path
 
 
+def test_paper_tags_save_and_list(db_root: Path):
+    pid = db.get_default_project_id(db_root)
+    paper_id = db.insert_paper(
+        db_root,
+        PaperAudit(title="Tagged paper", project_id=pid, coverage=PaperCoverage.ABSTRACT_ONLY),
+    )
+    assert db.list_tags_for_paper(db_root, paper_id) == []
+    assert db.list_distinct_tags_for_project(db_root, pid) == []
+    db.replace_tags_for_paper(db_root, paper_id, ["Bi", "IMC", "Bi"])
+    assert db.list_tags_for_paper(db_root, paper_id) == ["Bi", "IMC"]
+    db.replace_tags_for_paper(db_root, paper_id, ["SAC"])
+    assert db.list_tags_for_paper(db_root, paper_id) == ["SAC"]
+    assert db.list_distinct_tags_for_project(db_root, pid) == ["SAC"]
+    by_paper = db.tags_by_paper_for_project(db_root, pid)
+    assert by_paper == {paper_id: ["SAC"]}
+
+
 def test_seeds_default_project(db_root: Path):
     projects = db.list_projects(db_root)
     assert len(projects) == 1
