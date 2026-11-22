@@ -14,6 +14,7 @@ from studio.audit_flow import (
     eligible_queued_audit_paper_ids,
     paper_ids_for_audit_all,
     paper_ids_for_selected_audit,
+    queue_papers_for_display,
     research_question_select_label,
     run_extract_and_triage,
 )
@@ -545,120 +546,138 @@ with tab_search:
                 st.rerun()
 
     st.subheader("Paper queue")
+    hide_abstract_only = st.checkbox(
+        "Hide abstract-only",
+        value=True,
+        key="hide_abstract_only",
+    )
     papers = db.list_papers_for_question(CODE_ROOT, pid, qid)
     if not papers:
         st.info("No papers yet for this project. Search above, or audit a PDF from the folder.")
     else:
-        papers_by_id = {int(p["id"]): p for p in papers}
-        eligible_ids = eligible_queued_audit_paper_ids(papers, PDFS_DIR)
-        if eligible_ids:
-            st.markdown("**Batch audit**")
-            checked_ids: set[int] = set()
-            for p in papers:
-                paper_id = int(p["id"])
-                if paper_id not in eligible_ids:
-                    continue
-                row_label = f"{p.get('year') or '?'} — {p['title'][:100]}"
-                if st.checkbox(row_label, key=f"batch_audit_chk_{paper_id}"):
-                    checked_ids.add(paper_id)
-            btn_sel, btn_all = st.columns(2)
-            with btn_sel:
-                run_selected = st.button("Audit selected", key="batch_audit_selected")
-            with btn_all:
-                run_all = st.button("Audit all PDFs", key="batch_audit_all_pdfs")
-            if run_selected or run_all:
-                if not signed_in:
-                    st.error(SIGN_IN_HELP)
-                else:
-                    if run_all:
-                        ids_to_run = paper_ids_for_audit_all(eligible_ids)
-                    else:
-                        ids_to_run = paper_ids_for_selected_audit(eligible_ids, checked_ids)
-                    if not ids_to_run:
-                        st.warning("No papers selected.")
-                    else:
-                        batch_lines = []
-                        with st.spinner(f"Auditing {len(ids_to_run)} paper(s)…"):
-                            for paper_id in ids_to_run:
-                                paper = papers_by_id[paper_id]
-                                n, extract_err, triage_warn, fatal = _run_queued_paper_audit(
-                                    paper,
-                                    project_id=pid,
-                                    question_id=qid,
-                                    research_q=research_q,
-                                    screening=screening,
-                                    target_metrics=target_metrics,
-                                )
-                                batch_lines.append(
-                                    _audit_result_line(
-                                        paper["title"],
-                                        n,
-                                        extract_err,
-                                        triage_warn,
-                                        fatal=fatal,
-                                    )
-                                )
-                        st.session_state["last_batch_audit_report"] = batch_lines
-                        st.rerun()
-
-        queue_labels = [f"{p.get('year') or '?'} — {p['title']}" for p in papers]
-        paper_ids = [int(p["id"]) for p in papers]
-        if "queue_paper_id" not in st.session_state or st.session_state.queue_paper_id not in paper_ids:
-            st.session_state.queue_paper_id = paper_ids[0]
-        q_sel_idx = paper_ids.index(st.session_state.queue_paper_id)
-        picked = st.radio(
-            "Select paper",
-            options=range(len(papers)),
-            format_func=lambda i: queue_labels[i],
-            index=q_sel_idx,
-            key="paper_queue_select",
-            horizontal=False,
-        )
-        st.session_state.queue_paper_id = paper_ids[picked]
-        p = papers[picked]
-        st.markdown(f"### {p['title']}")
-        st.write(f"Coverage: **{p['coverage']}**")
-        if p.get("pdf_path"):
-            st.write(f"PDF: `{p['pdf_path']}`")
-            if st.button("Open PDF", key=f"open_pdf_{p['id']}"):
-                _open_pdf(p["pdf_path"])
-        _render_audit_brief(p)
-        if int(p["id"]) in eligible_queued_audit_paper_ids([p], PDFS_DIR):
-            if st.button("Audit PDF (extract rows)", key=f"audit_{p['id']}"):
-                if not signed_in:
-                    st.error(SIGN_IN_HELP)
-                else:
-                    pdf_path = PDFS_DIR / p["pdf_path"]
-                    if not pdf_path.is_file():
-                        st.error("PDF file missing on disk.")
-                    else:
-                        try:
-                            with st.spinner("Extracting tables…"):
-                                n, extract_err, triage_warn = run_extract_and_triage(
-                                    CODE_ROOT,
-                                    p["id"],
-                                    pid,
-                                    qid,
-                                    pdf_path,
-                                    p["title"],
-                                    research_question=research_q,
-                                    screening_criteria=screening,
-                                    target_metrics=target_metrics,
-                                    on_status=_codex_on_status(),
-                                )
-                        except RuntimeError as exc:
-                            st.error(str(exc))
-                            n, extract_err, triage_warn = 0, None, None
-                        if extract_err:
-                            st.warning(extract_err)
-                        elif n:
-                            st.success(f"Stored {n} quote-verified row(s).")
-                        elif extract_err is None:
-                            st.info("No rows passed the gates.")
-                        if triage_warn:
-                            st.warning(f"Triage failed (rows kept): {triage_warn}")
+        queue_papers = queue_papers_for_display(papers, PDFS_DIR, hide_abstract_only)
+        if hide_abstract_only and not queue_papers:
+            st.info(
+                "Abstract-only papers are hidden. Uncheck **Hide abstract-only** to triage them."
+            )
         else:
-            st.caption(ABSTRACT_ONLY_AUDIT_CAPTION)
+            papers_by_id = {int(p["id"]): p for p in papers}
+            eligible_ids = eligible_queued_audit_paper_ids(papers, PDFS_DIR)
+            if eligible_ids:
+                st.markdown("**Batch audit**")
+                checked_ids: set[int] = set()
+                for p in queue_papers:
+                    paper_id = int(p["id"])
+                    if paper_id not in eligible_ids:
+                        continue
+                    row_label = f"{p.get('year') or '?'} — {p['title'][:100]}"
+                    if st.checkbox(row_label, key=f"batch_audit_chk_{paper_id}"):
+                        checked_ids.add(paper_id)
+                btn_sel, btn_all = st.columns(2)
+                with btn_sel:
+                    run_selected = st.button("Audit selected", key="batch_audit_selected")
+                with btn_all:
+                    run_all = st.button("Audit all PDFs", key="batch_audit_all_pdfs")
+                if run_selected or run_all:
+                    if not signed_in:
+                        st.error(SIGN_IN_HELP)
+                    else:
+                        if run_all:
+                            ids_to_run = paper_ids_for_audit_all(eligible_ids)
+                        else:
+                            ids_to_run = paper_ids_for_selected_audit(
+                                eligible_ids, checked_ids
+                            )
+                        if not ids_to_run:
+                            st.warning("No papers selected.")
+                        else:
+                            batch_lines = []
+                            with st.spinner(f"Auditing {len(ids_to_run)} paper(s)…"):
+                                for paper_id in ids_to_run:
+                                    paper = papers_by_id[paper_id]
+                                    n, extract_err, triage_warn, fatal = _run_queued_paper_audit(
+                                        paper,
+                                        project_id=pid,
+                                        question_id=qid,
+                                        research_q=research_q,
+                                        screening=screening,
+                                        target_metrics=target_metrics,
+                                    )
+                                    batch_lines.append(
+                                        _audit_result_line(
+                                            paper["title"],
+                                            n,
+                                            extract_err,
+                                            triage_warn,
+                                            fatal=fatal,
+                                        )
+                                    )
+                            st.session_state["last_batch_audit_report"] = batch_lines
+                            st.rerun()
+
+            queue_labels = [
+                f"{p.get('year') or '?'} — {p['title']}" for p in queue_papers
+            ]
+            paper_ids = [int(p["id"]) for p in queue_papers]
+            if (
+                "queue_paper_id" not in st.session_state
+                or st.session_state.queue_paper_id not in paper_ids
+            ):
+                st.session_state.queue_paper_id = paper_ids[0]
+            q_sel_idx = paper_ids.index(st.session_state.queue_paper_id)
+            picked = st.radio(
+                "Select paper",
+                options=range(len(queue_papers)),
+                format_func=lambda i: queue_labels[i],
+                index=q_sel_idx,
+                key="paper_queue_select",
+                horizontal=False,
+            )
+            st.session_state.queue_paper_id = paper_ids[picked]
+            p = queue_papers[picked]
+            st.markdown(f"### {p['title']}")
+            st.write(f"Coverage: **{p['coverage']}**")
+            if p.get("pdf_path"):
+                st.write(f"PDF: `{p['pdf_path']}`")
+                if st.button("Open PDF", key=f"open_pdf_{p['id']}"):
+                    _open_pdf(p["pdf_path"])
+            _render_audit_brief(p)
+            if int(p["id"]) in eligible_queued_audit_paper_ids([p], PDFS_DIR):
+                if st.button("Audit PDF (extract rows)", key=f"audit_{p['id']}"):
+                    if not signed_in:
+                        st.error(SIGN_IN_HELP)
+                    else:
+                        pdf_path = PDFS_DIR / p["pdf_path"]
+                        if not pdf_path.is_file():
+                            st.error("PDF file missing on disk.")
+                        else:
+                            try:
+                                with st.spinner("Extracting tables…"):
+                                    n, extract_err, triage_warn = run_extract_and_triage(
+                                        CODE_ROOT,
+                                        p["id"],
+                                        pid,
+                                        qid,
+                                        pdf_path,
+                                        p["title"],
+                                        research_question=research_q,
+                                        screening_criteria=screening,
+                                        target_metrics=target_metrics,
+                                        on_status=_codex_on_status(),
+                                    )
+                            except RuntimeError as exc:
+                                st.error(str(exc))
+                                n, extract_err, triage_warn = 0, None, None
+                            if extract_err:
+                                st.warning(extract_err)
+                            elif n:
+                                st.success(f"Stored {n} quote-verified row(s).")
+                            elif extract_err is None:
+                                st.info("No rows passed the gates.")
+                            if triage_warn:
+                                st.warning(f"Triage failed (rows kept): {triage_warn}")
+            else:
+                st.caption(ABSTRACT_ONLY_AUDIT_CAPTION)
 
 with tab_data:
     st.subheader("Extracted measurements")

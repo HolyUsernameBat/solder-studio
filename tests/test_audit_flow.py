@@ -5,6 +5,7 @@ from studio.audit_flow import (
     eligible_queued_audit_paper_ids,
     paper_ids_for_audit_all,
     paper_ids_for_selected_audit,
+    queue_papers_for_display,
     research_question_select_label,
 )
 from studio.schema import PaperCoverage
@@ -52,3 +53,43 @@ def test_paper_ids_for_selected_audit_honors_checkboxes():
     assert paper_ids_for_selected_audit(eligible, {20, 99}) == [20]
     assert paper_ids_for_selected_audit(eligible, set()) == []
     assert paper_ids_for_audit_all(eligible) == [10, 20, 30]
+
+
+def _sample_papers_for_filter() -> list[dict]:
+    return [
+        {
+            "id": 1,
+            "title": "Full on disk",
+            "coverage": PaperCoverage.FULL_TEXT.value,
+            "pdf_path": "on_disk.pdf",
+        },
+        {
+            "id": 2,
+            "title": "Abstract only",
+            "coverage": PaperCoverage.ABSTRACT_ONLY.value,
+            "pdf_path": None,
+        },
+        {
+            "id": 3,
+            "title": "Full missing file",
+            "coverage": PaperCoverage.FULL_TEXT.value,
+            "pdf_path": "missing.pdf",
+        },
+    ]
+
+
+def test_queue_papers_for_display_hide_off_returns_all(tmp_path: Path):
+    pdfs = tmp_path / "pdfs"
+    pdfs.mkdir()
+    (pdfs / "on_disk.pdf").write_bytes(b"%PDF-1.4")
+    papers = _sample_papers_for_filter()
+    assert queue_papers_for_display(papers, pdfs, False) == papers
+
+
+def test_queue_papers_for_display_hide_on_keeps_eligible_only(tmp_path: Path):
+    pdfs = tmp_path / "pdfs"
+    pdfs.mkdir()
+    (pdfs / "on_disk.pdf").write_bytes(b"%PDF-1.4")
+    papers = _sample_papers_for_filter()
+    visible = queue_papers_for_display(papers, pdfs, True)
+    assert [int(p["id"]) for p in visible] == [1]

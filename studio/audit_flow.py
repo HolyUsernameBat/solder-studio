@@ -38,6 +38,16 @@ def eligible_queued_audit_paper_ids(
     return out
 
 
+def queue_papers_for_display(
+    papers: Sequence[dict], pdfs_dir: Path, hide_abstract_only: bool
+) -> list[dict]:
+    """Papers shown in Select paper and batch-audit lists."""
+    if not hide_abstract_only:
+        return list(papers)
+    eligible = set(eligible_queued_audit_paper_ids(papers, pdfs_dir))
+    return [p for p in papers if int(p["id"]) in eligible]
+
+
 def paper_ids_for_selected_audit(
     eligible_ids: Sequence[int], checked_ids: set[int]
 ) -> list[int]:
