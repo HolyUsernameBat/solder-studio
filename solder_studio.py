@@ -44,6 +44,16 @@ from studio.pdfs_folder import (
 )
 from studio.schema import PaperCoverage, TriageTier
 from studio.synthesize import run_synthesis
+from studio.queue_table import (
+    QUEUE_TABLE_DISPLAY_COLUMNS,
+    audit_checked_ids_from_table,
+    enforce_audit_eligibility,
+    merge_audit_state,
+    paper_ids_in_queue_table,
+    queue_table_dataframe,
+    queue_table_row_label_for_id,
+    selection_default_row_index,
+)
 from studio.triage import run_triage
 
 CODE_ROOT = Path(__file__).resolve().parent
@@ -614,16 +624,58 @@ with tab_search:
         if queue_papers:
             papers_by_id = {int(p["id"]): p for p in papers}
             eligible_ids = eligible_queued_audit_paper_ids(papers, PDFS_DIR)
+            eligible_set = set(eligible_ids)
+            if "queue_audit_by_id" not in st.session_state:
+                st.session_state.queue_audit_by_id = {}
+            queue_df = queue_table_dataframe(
+                queue_papers,
+                tags_by_paper_id=tags_by_paper,
+                eligible_audit_ids=eligible_set,
+                audit_checked=st.session_state.queue_audit_by_id,
+            )
+            queue_col_config = {
+                "Year": st.column_config.NumberColumn("Year", width="small"),
+                "Title": st.column_config.TextColumn("Title", width="large"),
+                "Coverage": st.column_config.TextColumn("Coverage", width="medium"),
+                "Triage": st.column_config.TextColumn("Triage", width="medium"),
+                "Relevance": st.column_config.TextColumn("Relevance", width="small"),
+                "Tags": st.column_config.TextColumn("Tags", width="medium"),
+                "Audit": st.column_config.CheckboxColumn(
+                    "Audit",
+                    help="Include in **Audit selected** (full-text with local PDF only).",
+                    default=False,
+                ),
+            }
+            edited_df = st.data_editor(
+                queue_df,
+                column_config=queue_col_config,
+                column_order=list(QUEUE_TABLE_DISPLAY_COLUMNS),
+                disabled=["Year", "Title", "Coverage", "Triage", "Relevance", "Tags"],
+                hide_index=True,
+                use_container_width=True,
+                num_rows="fixed",
+                key="paper_queue_editor",
+            )
+            edited_df = enforce_audit_eligibility(edited_df, eligible_set)
+            st.session_state.queue_audit_by_id = merge_audit_state(
+                st.session_state.queue_audit_by_id,
+                edited_df,
+                eligible_set,
+            )
+            checked_ids = audit_checked_ids_from_table(edited_df, eligible_set)
+            paper_ids = paper_ids_in_queue_table(edited_df)
+            queue_paper_id = st.selectbox(
+                "Paper detail",
+                options=paper_ids,
+                format_func=lambda pid: queue_table_row_label_for_id(edited_df, pid),
+                index=selection_default_row_index(
+                    paper_ids, st.session_state.get("queue_paper_id")
+                ),
+                key="queue_paper_focus",
+            )
+            st.session_state.queue_paper_id = queue_paper_id
             if eligible_ids:
                 st.markdown("**Batch audit**")
-                checked_ids: set[int] = set()
-                for p in queue_papers:
-                    paper_id = int(p["id"])
-                    if paper_id not in eligible_ids:
-                        continue
-                    row_label = f"{p.get('year') or '?'} — {p['title'][:100]}"
-                    if st.checkbox(row_label, key=f"batch_audit_chk_{paper_id}"):
-                        checked_ids.add(paper_id)
                 btn_sel, btn_all = st.columns(2)
                 with btn_sel:
                     run_selected = st.button("Audit selected", key="batch_audit_selected")
@@ -666,26 +718,7 @@ with tab_search:
                             st.session_state["last_batch_audit_report"] = batch_lines
                             st.rerun()
 
-            queue_labels = [
-                f"{p.get('year') or '?'} — {p['title']}" for p in queue_papers
-            ]
-            paper_ids = [int(p["id"]) for p in queue_papers]
-            if (
-                "queue_paper_id" not in st.session_state
-                or st.session_state.queue_paper_id not in paper_ids
-            ):
-                st.session_state.queue_paper_id = paper_ids[0]
-            q_sel_idx = paper_ids.index(st.session_state.queue_paper_id)
-            picked = st.radio(
-                "Select paper",
-                options=range(len(queue_papers)),
-                format_func=lambda i: queue_labels[i],
-                index=q_sel_idx,
-                key="paper_queue_select",
-                horizontal=False,
-            )
-            st.session_state.queue_paper_id = paper_ids[picked]
-            p = queue_papers[picked]
+            p = papers_by_id[st.session_state.queue_paper_id]
             st.markdown(f"### {p['title']}")
             st.write(f"Coverage: **{p['coverage']}**")
             saved_tags = db.list_tags_for_paper(CODE_ROOT, int(p["id"]))

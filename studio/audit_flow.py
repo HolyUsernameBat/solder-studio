@@ -55,7 +55,7 @@ def eligible_queued_audit_paper_ids(
 def queue_papers_for_display(
     papers: Sequence[dict], pdfs_dir: Path, hide_abstract_only: bool
 ) -> list[dict]:
-    """Papers shown in Select paper and batch-audit lists (hide-abstract-only step only)."""
+    """Papers shown in the paper queue table (hide-abstract-only step only)."""
     if not hide_abstract_only:
         return list(papers)
     eligible = set(eligible_queued_audit_paper_ids(papers, pdfs_dir))
