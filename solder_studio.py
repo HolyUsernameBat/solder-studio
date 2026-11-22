@@ -31,6 +31,7 @@ from studio.charts import (
     rows_to_dataframe,
     y_options_matching_x_unit,
 )
+from studio.batch_audit import audit_queued_paper, create_and_audit_unlinked_pdf
 from studio.codex_backend import (
     CODEX_MODEL_EXTRACT,
     CODEX_MODEL_SYNTH,
@@ -38,7 +39,8 @@ from studio.codex_backend import (
     fetch_codex_model_catalog,
     model_picker_options,
 )
-from studio.openalex import DEFAULT_OPENALEX_QUERY, search_openalex, try_fetch_pdf_for_work
+from studio.openalex import DEFAULT_OPENALEX_QUERY
+from studio.openalex_workflow import store_openalex_search_results
 from studio.pdfs_folder import (
     is_pdf_path_stored,
     list_folder_pdfs,
@@ -60,8 +62,6 @@ from studio.queue_table import (
     queue_table_row_label_for_id,
     selection_default_row_index,
 )
-from studio.triage import run_triage
-
 CODE_ROOT = Path(__file__).resolve().parent
 PDFS_DIR = CODE_ROOT / "pdfs"
 SIGN_IN_HELP = "Close this page and run Start_Research_Studio.bat to sign in with ChatGPT."
@@ -276,28 +276,19 @@ def _run_queued_paper_audit(
     target_metrics: list[str],
 ) -> tuple[int, str | None, str | None, str | None]:
     """Returns (rows, extract_err, triage_warn, fatal_error)."""
-    pdf_path = PDFS_DIR / p["pdf_path"]
-    if not pdf_path.is_file():
-        return 0, None, None, "PDF file missing on disk."
-    try:
-        n, extract_err, triage_warn = run_extract_and_triage(
-            CODE_ROOT,
-            int(p["id"]),
-            project_id,
-            question_id,
-            pdf_path,
-            p["title"],
-            research_question=research_q,
-            screening_criteria=screening,
-            target_metrics=target_metrics,
-            on_status=_codex_on_status(),
-            extract_model=_session_extract_model(),
-        )
-    except RuntimeError as exc:
-        return 0, None, None, str(exc)
-    except Exception as exc:
-        return 0, None, None, str(exc)
-    return n, extract_err, triage_warn, None
+    run = audit_queued_paper(
+        CODE_ROOT,
+        p,
+        project_id=project_id,
+        question_id=question_id,
+        pdfs_dir=PDFS_DIR,
+        research_question=research_q,
+        screening_criteria=screening,
+        target_metrics=target_metrics,
+        on_status=_codex_on_status(),
+        extract_model=_session_extract_model(),
+    )
+    return run.rows_stored, run.extract_error, run.triage_warning, run.fatal_error
 
 
 def _run_create_and_audit_pdf(
@@ -309,30 +300,19 @@ def _run_create_and_audit_pdf(
     screening: str,
     target_metrics: list[str],
 ) -> tuple[int, str | None, str | None, str | None]:
-    pdf_path = PDFS_DIR / pdf_name
-    if not pdf_path.is_file():
-        return 0, None, None, "PDF file missing on disk."
-    title = title_from_pdf_filename(pdf_name)
-    paper_id = db.insert_folder_paper(CODE_ROOT, pdf_name, project_id)
-    try:
-        n, extract_err, triage_warn = run_extract_and_triage(
-            CODE_ROOT,
-            paper_id,
-            project_id,
-            question_id,
-            pdf_path,
-            title,
-            research_question=research_q,
-            screening_criteria=screening,
-            target_metrics=target_metrics,
-            on_status=_codex_on_status(),
-            extract_model=_session_extract_model(),
-        )
-    except RuntimeError as exc:
-        return 0, None, None, str(exc)
-    except Exception as exc:
-        return 0, None, None, str(exc)
-    return n, extract_err, triage_warn, None
+    run = create_and_audit_unlinked_pdf(
+        CODE_ROOT,
+        pdf_name,
+        project_id=project_id,
+        question_id=question_id,
+        pdfs_dir=PDFS_DIR,
+        research_question=research_q,
+        screening_criteria=screening,
+        target_metrics=target_metrics,
+        on_status=_codex_on_status(),
+        extract_model=_session_extract_model(),
+    )
+    return run.rows_stored, run.extract_error, run.triage_warning, run.fatal_error
 
 
 st.sidebar.subheader("Codex")
@@ -487,48 +467,32 @@ with tab_search:
         else:
             with st.spinner("Searching…"):
                 try:
-                    hits = search_openalex(query)
+                    outcome = store_openalex_search_results(
+                        CODE_ROOT,
+                        pid,
+                        qid,
+                        query,
+                        PDFS_DIR,
+                        research_question=research_q,
+                        screening_criteria=screening,
+                        extract_model=_session_extract_model(),
+                        on_status=_codex_on_status(),
+                    )
+                    saved = outcome["stored_count"]
+                    for item in outcome["papers"]:
+                        if item.get("triage_error"):
+                            st.warning(
+                                f"Triage failed for {item['title']}: {item['triage_error']}"
+                            )
+                except ValueError as exc:
+                    st.error(str(exc))
+                    saved = 0
+                except RuntimeError as exc:
+                    st.error(str(exc))
+                    saved = 0
                 except Exception as exc:
                     st.error(str(exc))
-                    hits = []
-                saved = 0
-                status_cb = _codex_on_status()
-                for hit in hits:
-                    work = hit.raw
-                    pdf_name, coverage = try_fetch_pdf_for_work(work, PDFS_DIR)
-                    paper = hit.paper
-                    paper.coverage = coverage
-                    paper.project_id = pid
-                    if pdf_name:
-                        paper.pdf_path = pdf_name
-                    paper_id = db.upsert_paper(CODE_ROOT, paper, pdf_kept=bool(pdf_name))
-                    try:
-                        tri = run_triage(
-                            paper.title,
-                            paper.abstract,
-                            research_question=research_q,
-                            screening_criteria=screening,
-                            on_status=status_cb,
-                            model=_session_extract_model(),
-                        )
-                        db.update_paper_audit(
-                            CODE_ROOT,
-                            paper_id,
-                            qid,
-                            tier=tri.triage_tier,
-                            relevance_score=tri.relevance_score,
-                            relevance_justification=tri.relevance_justification,
-                            core_claim_and_mechanism=tri.core_claim_and_mechanism,
-                            system_and_conditions=tri.system_and_conditions,
-                            key_findings=tri.key_findings,
-                            limitations_and_caveats=tri.limitations_and_caveats,
-                        )
-                    except RuntimeError as exc:
-                        st.error(str(exc))
-                        break
-                    except Exception as exc:
-                        st.warning(f"Triage failed for {paper.title}: {exc}")
-                    saved += 1
+                    saved = 0
                 st.success(f"Stored {saved} paper(s) for this project. Search does not write measurements.")
 
     batch_report = st.session_state.pop("last_batch_audit_report", None)
