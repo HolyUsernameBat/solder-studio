@@ -41,6 +41,102 @@ def pdf_urls_from_locations(locations: list[dict[str, Any]]) -> list[str]:
     return urls
 
 
+_ARXIV_URL_PREFIX = re.compile(
+    r"^https?://(?:www\.)?arxiv\.org/(?:abs|pdf)/",
+    re.IGNORECASE,
+)
+_PMCID_RE = re.compile(r"(PMC\d+)", re.IGNORECASE)
+
+
+def normalize_arxiv_id(raw: str) -> Optional[str]:
+    """Strip OpenAlex-style arXiv URLs/prefixes to an id suitable for arxiv.org/pdf/."""
+    if not raw or not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    s = _ARXIV_URL_PREFIX.sub("", s)
+    if s.lower().startswith("arxiv:"):
+        s = s[6:]
+    s = s.strip().strip("/")
+    return s or None
+
+
+def arxiv_ids_on_work(work: dict[str, Any]) -> list[str]:
+    ids = work.get("ids") or {}
+    found: list[str] = []
+    seen: set[str] = set()
+    arxiv_val = ids.get("arxiv")
+    if isinstance(arxiv_val, str) and arxiv_val.strip():
+        found.append(arxiv_val)
+        seen.add(arxiv_val)
+    for key, val in ids.items():
+        if not isinstance(val, str) or not val.strip():
+            continue
+        if key == "arxiv":
+            continue
+        if "arxiv" in key.lower() or "arxiv" in val.lower():
+            if val not in seen:
+                seen.add(val)
+                found.append(val)
+    return found
+
+
+def arxiv_pdf_url_for_work(work: dict[str, Any]) -> Optional[str]:
+    for raw in arxiv_ids_on_work(work):
+        aid = normalize_arxiv_id(raw)
+        if aid:
+            return f"https://arxiv.org/pdf/{aid}"
+    return None
+
+
+def normalize_pmcid(raw: str) -> Optional[str]:
+    if not raw or not isinstance(raw, str):
+        return None
+    match = _PMCID_RE.search(raw.strip())
+    if not match:
+        return None
+    return match.group(1).upper()
+
+
+def pmc_pdf_url_for_work(work: dict[str, Any]) -> Optional[str]:
+    ids = work.get("ids") or {}
+    for key in ("pmcid", "pmc"):
+        val = ids.get(key)
+        if isinstance(val, str):
+            pmcid = normalize_pmcid(val)
+            if pmcid:
+                return f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/pdf/"
+    for val in ids.values():
+        if isinstance(val, str):
+            pmcid = normalize_pmcid(val)
+            if pmcid:
+                return f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/pdf/"
+    return None
+
+
+def pdf_candidate_urls(work: dict[str, Any]) -> list[str]:
+    """Ordered, deduplicated PDF download candidates from unauthenticated work JSON."""
+    urls: list[str] = []
+    seen: set[str] = set()
+
+    def add(url: Optional[str]) -> None:
+        if not url or url in seen:
+            return
+        seen.add(url)
+        urls.append(url)
+
+    for url in pdf_urls_from_locations(work_pdf_locations(work)):
+        add(url)
+
+    oa = work.get("open_access") or {}
+    oa_url = oa.get("oa_url") if isinstance(oa, dict) else None
+    if isinstance(oa_url, str):
+        add(oa_url.strip() or None)
+
+    add(arxiv_pdf_url_for_work(work))
+    add(pmc_pdf_url_for_work(work))
+    return urls
+
+
 def work_pdf_locations(work: dict[str, Any]) -> list[dict[str, Any]]:
     """Merge ``locations`` with ``best_oa_location`` and ``primary_location``."""
     locations: list[dict[str, Any]] = list(work.get("locations") or [])
@@ -207,8 +303,7 @@ def try_fetch_pdf_for_work(
     pdfs_dir: Path,
     session: Optional[requests.Session] = None,
 ) -> tuple[Optional[str], PaperCoverage]:
-    locations = work_pdf_locations(work)
-    urls = pdf_urls_from_locations(locations)
+    urls = pdf_candidate_urls(work)
     for url in urls:
         try:
             body = download_pdf_candidate(url, session=session)
