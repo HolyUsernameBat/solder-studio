@@ -43,6 +43,7 @@ def run_triage(
     research_question: str,
     screening_criteria: str = "",
     on_status: Callable[[str], None] | None = None,
+    model: str | None = None,
 ) -> PaperTriageAudit:
     snippet = (text or "(none)")[:TRIAGE_TEXT_MAX_CHARS]
     user = f"Title: {title}\n\nText:\n{snippet}"
@@ -51,7 +52,7 @@ def run_triage(
         _triage_system(research_question, screening_criteria),
         user,
         on_status=on_status,
-        model=CODEX_MODEL_EXTRACT,
+        model=model or CODEX_MODEL_EXTRACT,
     )
     if not isinstance(parsed, PaperTriageAudit):
         raise ValueError("Triage parse failed.")

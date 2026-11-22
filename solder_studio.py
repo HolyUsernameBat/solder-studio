@@ -31,7 +31,13 @@ from studio.charts import (
     rows_to_dataframe,
     y_options_matching_x_unit,
 )
-from studio.codex_backend import chatgpt_subscription_active
+from studio.codex_backend import (
+    CODEX_MODEL_EXTRACT,
+    CODEX_MODEL_SYNTH,
+    chatgpt_subscription_active,
+    fetch_codex_model_catalog,
+    model_picker_options,
+)
 from studio.openalex import DEFAULT_OPENALEX_QUERY, search_openalex, try_fetch_pdf_for_work
 from studio.pdfs_folder import (
     is_pdf_path_stored,
@@ -60,6 +66,11 @@ CODE_ROOT = Path(__file__).resolve().parent
 PDFS_DIR = CODE_ROOT / "pdfs"
 SIGN_IN_HELP = "Close this page and run Start_Research_Studio.bat to sign in with ChatGPT."
 CODEX_LOG_MAX_LINES = 20
+SESSION_CODEX_EXTRACT = "codex_model_extract"
+SESSION_CODEX_PHYSICAL = "codex_model_physical"
+SESSION_CODEX_INTERFACE = "codex_model_interface"
+SESSION_CODEX_SKEPTIC = "codex_model_skeptic"
+SESSION_CODEX_CATALOG = "codex_model_catalog_loaded"
 
 st.set_page_config(page_title="Solder Studio", layout="wide")
 st.title("Solder Studio")
@@ -123,13 +134,75 @@ def _codex_log_append(line: str) -> None:
     )[-CODEX_LOG_MAX_LINES:]
 
 
+def _codex_model_options() -> list[str]:
+    if SESSION_CODEX_CATALOG not in st.session_state:
+        try:
+            st.session_state[SESSION_CODEX_CATALOG] = fetch_codex_model_catalog()
+        except Exception:
+            st.session_state[SESSION_CODEX_CATALOG] = []
+    return model_picker_options(st.session_state[SESSION_CODEX_CATALOG])
+
+
+def _ensure_codex_model_selection(
+    state_key: str, default: str, options: list[str]
+) -> None:
+    if state_key not in st.session_state:
+        st.session_state[state_key] = default
+    current = st.session_state[state_key]
+    if current not in options:
+        st.session_state[state_key] = (
+            default if default in options else options[0]
+        )
+
+
+def _draw_codex_model_pickers() -> None:
+    if not signed_in:
+        return
+    options = _codex_model_options()
+    if not options:
+        options = list(model_picker_options([]))
+    defaults = (
+        CODEX_MODEL_EXTRACT,
+        CODEX_MODEL_SYNTH,
+        CODEX_MODEL_SYNTH,
+        CODEX_MODEL_SYNTH,
+    )
+    keys = (
+        SESSION_CODEX_EXTRACT,
+        SESSION_CODEX_PHYSICAL,
+        SESSION_CODEX_INTERFACE,
+        SESSION_CODEX_SKEPTIC,
+    )
+    labels = (
+        "Extract / audit",
+        "Physical Metallurgist",
+        "Interface & Mechanisms",
+        "Reliability Skeptic",
+    )
+    for state_key, default, label in zip(keys, defaults, labels):
+        _ensure_codex_model_selection(state_key, default, options)
+        st.sidebar.selectbox(label, options, key=state_key)
+
+
+def _session_extract_model() -> str:
+    return st.session_state.get(SESSION_CODEX_EXTRACT, CODEX_MODEL_EXTRACT)
+
+
+def _session_lens_models() -> tuple[str, str, str]:
+    return (
+        st.session_state.get(SESSION_CODEX_PHYSICAL, CODEX_MODEL_SYNTH),
+        st.session_state.get(SESSION_CODEX_INTERFACE, CODEX_MODEL_SYNTH),
+        st.session_state.get(SESSION_CODEX_SKEPTIC, CODEX_MODEL_SYNTH),
+    )
+
+
 def _draw_codex_sidebar() -> None:
     _codex_log_init()
     lines = st.session_state.codex_log
     if lines:
         body = "\n".join(lines)
     elif signed_in:
-        body = "Codex idle."
+        body = f"Codex idle.\nextract: {_session_extract_model()}"
     else:
         sidebar_log.empty()
         return
@@ -218,6 +291,7 @@ def _run_queued_paper_audit(
             screening_criteria=screening,
             target_metrics=target_metrics,
             on_status=_codex_on_status(),
+            extract_model=_session_extract_model(),
         )
     except RuntimeError as exc:
         return 0, None, None, str(exc)
@@ -252,6 +326,7 @@ def _run_create_and_audit_pdf(
             screening_criteria=screening,
             target_metrics=target_metrics,
             on_status=_codex_on_status(),
+            extract_model=_session_extract_model(),
         )
     except RuntimeError as exc:
         return 0, None, None, str(exc)
@@ -260,6 +335,9 @@ def _run_create_and_audit_pdf(
     return n, extract_err, triage_warn, None
 
 
+st.sidebar.subheader("Codex")
+_draw_codex_model_pickers()
+st.sidebar.caption("Codex activity")
 _draw_codex_sidebar()
 
 if not signed_in:
@@ -431,6 +509,7 @@ with tab_search:
                             research_question=research_q,
                             screening_criteria=screening,
                             on_status=status_cb,
+                            model=_session_extract_model(),
                         )
                         db.update_paper_audit(
                             CODE_ROOT,
@@ -521,6 +600,7 @@ with tab_search:
                                         screening_criteria=screening,
                                         target_metrics=target_metrics,
                                         on_status=_codex_on_status(),
+                                        extract_model=_session_extract_model(),
                                     )
                             except RuntimeError as exc:
                                 st.error(str(exc))
@@ -762,6 +842,7 @@ with tab_search:
                                         screening_criteria=screening,
                                         target_metrics=target_metrics,
                                         on_status=_codex_on_status(),
+                                        extract_model=_session_extract_model(),
                                     )
                             except RuntimeError as exc:
                                 st.error(str(exc))
@@ -847,11 +928,15 @@ with tab_synth:
         else:
             papers_by_id = {p["id"]: p["title"] for p in db.list_papers(CODE_ROOT, project_id=pid)}
             try:
+                phys, iface, skeptic = _session_lens_models()
                 briefing, stop, used = run_synthesis(
                     all_rows,
                     research_q,
                     paper_titles=papers_by_id,
                     on_status=_codex_on_status(),
+                    physical_model=phys,
+                    interface_model=iface,
+                    skeptic_model=skeptic,
                 )
             except RuntimeError as exc:
                 st.error(str(exc))

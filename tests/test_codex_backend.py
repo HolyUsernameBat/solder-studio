@@ -10,6 +10,8 @@ from studio.codex_backend import (
     codex_compatible_json_schema,
     complete_structured,
     lint_codex_compatible_json_schema,
+    model_picker_options,
+    parse_codex_debug_models,
     status_from_event,
     subscription_from_status,
 )
@@ -21,6 +23,44 @@ from studio.schema import (
     ReliabilitySkepticLensOutput,
 )
 from studio.triage import PaperTriageAudit
+
+
+CODEX_DEBUG_MODELS_FIXTURE = """
+{
+  "models": [
+    {"slug": "gpt-astra", "visibility": "hidden"},
+    {"slug": "gpt-6.2-sol", "visibility": "list"},
+  {"slug": "gpt-6-luna", "visibility": "list"},
+    {"slug": "gpt-6-luna", "visibility": "list"}
+  ]
+}
+""".strip()
+
+
+def test_parse_codex_debug_models_lists_visible_slugs_in_order():
+    assert parse_codex_debug_models(CODEX_DEBUG_MODELS_FIXTURE) == [
+        "gpt-6.2-sol",
+        "gpt-6-luna",
+    ]
+
+
+def test_parse_codex_debug_models_empty_on_bad_input():
+    assert parse_codex_debug_models("") == []
+    assert parse_codex_debug_models("not json") == []
+    assert parse_codex_debug_models('{"items": []}') == []
+
+
+def test_model_picker_options_include_pins_when_catalog_empty():
+    assert model_picker_options([]) == [
+        CODEX_MODEL_EXTRACT,
+        CODEX_MODEL_SYNTH,
+    ]
+
+
+def test_model_picker_options_merge_catalog_and_pins():
+    opts = model_picker_options(["gpt-custom", CODEX_MODEL_EXTRACT])
+    assert opts[:2] == ["gpt-custom", CODEX_MODEL_EXTRACT]
+    assert CODEX_MODEL_SYNTH in opts
 
 
 def test_chatgpt_subscription_status_is_recognized():

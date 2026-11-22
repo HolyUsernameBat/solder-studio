@@ -177,12 +177,14 @@ def run_extract_and_triage(
     screening_criteria: str,
     target_metrics: list[str],
     on_status: Callable[[str], None] | None = None,
+    extract_model: str | None = None,
 ) -> tuple[int, Optional[str], Optional[str]]:
     """
     Delete prior measurements for paper, extract quote-verified rows, then structured triage.
 
     Returns (rows_stored, extract_warning, triage_warning).
     """
+    model = extract_model
     db.delete_measurements_for_paper(base, paper_id, question_id)
     rows, err = extract_rows_from_pdf_with_model(
         pdf_path,
@@ -190,6 +192,7 @@ def run_extract_and_triage(
         research_question=research_question,
         target_metrics=target_metrics,
         on_status=on_status,
+        model=model,
     )
     if err:
         return 0, err, None
@@ -213,6 +216,7 @@ def run_extract_and_triage(
                 research_question=research_question,
                 screening_criteria=screening_criteria,
                 on_status=on_status,
+                model=model,
             )
             db.update_paper_audit(
                 base,

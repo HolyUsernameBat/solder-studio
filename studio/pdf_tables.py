@@ -131,6 +131,7 @@ def extract_rows_from_pdf_with_model(
     research_question: str,
     target_metrics: list[str],
     on_status: Callable[[str], None] | None = None,
+    model: str | None = None,
 ) -> tuple[list[MeasurementRow], Optional[str]]:
     table_text, err = audit_pdf_text(pdf_path)
     if err:
@@ -142,7 +143,7 @@ def extract_rows_from_pdf_with_model(
         _extraction_system(target_metrics),
         build_extraction_user_prompt(capped, paper_title, research_question),
         on_status=on_status,
-        model=CODEX_MODEL_EXTRACT,
+        model=model or CODEX_MODEL_EXTRACT,
     )
     if not isinstance(parsed, ExtractionList):
         return [], "Model returned no parsed extraction."

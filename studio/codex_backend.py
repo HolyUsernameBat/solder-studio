@@ -25,6 +25,13 @@ STATUS_TEXT_MAX = 160
 CODEX_MODEL_EXTRACT = "gpt-6.2-sol"  # paper audit + measurement extraction
 CODEX_MODEL_SYNTH = "gpt-6-luna"  # three synthesis lenses
 
+CODEX_DEFAULT_PIN_SLUGS = (
+    CODEX_MODEL_EXTRACT,
+    CODEX_MODEL_SYNTH,
+    CODEX_MODEL_SYNTH,
+    CODEX_MODEL_SYNTH,
+)
+
 _SCHEMA_CONTAINER_KEYS = (
     "properties",
     "patternProperties",
@@ -159,6 +166,57 @@ def _lint_codex_schema_node(node: Any, path: str, errors: list[str]) -> None:
         sub = node.get(key)
         if isinstance(sub, dict):
             _lint_codex_schema_node(sub, f"{path}/{key}", errors)
+
+
+def parse_codex_debug_models(text: str) -> list[str]:
+    """Parse ``codex debug models`` stdout; return visibility=list slugs in catalog order."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return []
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        return []
+    items = data.get("models")
+    if not isinstance(items, list):
+        return []
+    slugs: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("visibility") != "list":
+            continue
+        slug = item.get("slug")
+        if isinstance(slug, str) and slug and slug not in slugs:
+            slugs.append(slug)
+    return slugs
+
+
+def model_picker_options(catalog: list[str] | None = None) -> list[str]:
+    """Catalog slugs plus default pins, deduped, pins always available."""
+    options: list[str] = []
+    for slug in list(catalog or []) + list(CODEX_DEFAULT_PIN_SLUGS):
+        if slug and slug not in options:
+            options.append(slug)
+    return options
+
+
+def fetch_codex_model_catalog() -> list[str]:
+    """Run ``codex debug models`` locally; return [] on failure."""
+    executable = find_codex()
+    if not executable:
+        return []
+    try:
+        completed = subprocess.run(
+            [executable, "debug", "models"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        return parse_codex_debug_models(completed.stdout + completed.stderr)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
 
 
 def find_codex() -> str | None:

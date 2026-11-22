@@ -130,6 +130,8 @@ def _call_lens(
     paper_titles: dict[int, str] | None,
     complete: CompleteFn,
     on_status: Callable[[str], None] | None = None,
+    *,
+    model: str | None = None,
 ) -> Any:
     instructions = _lens_system(lens_name, research_question, extra)
     user = build_synthesis_user_prompt(rows, paper_titles)
@@ -138,7 +140,7 @@ def _call_lens(
         instructions,
         user,
         on_status=on_status,
-        model=CODEX_MODEL_SYNTH,
+        model=model or CODEX_MODEL_SYNTH,
     )
     if not isinstance(parsed, model_cls):
         raise RuntimeError(f"{lens_name} returned no parsed output.")
@@ -151,6 +153,10 @@ def run_lens_calls(
     paper_titles: dict[int, str] | None = None,
     complete: CompleteFn | None = None,
     on_status: Callable[[str], None] | None = None,
+    *,
+    physical_model: str | None = None,
+    interface_model: str | None = None,
+    skeptic_model: str | None = None,
 ) -> LensBundle:
     complete_fn = complete or complete_structured
     physical = _call_lens(
@@ -162,6 +168,7 @@ def run_lens_calls(
         paper_titles,
         complete_fn,
         on_status=on_status,
+        model=physical_model,
     )
     interface = _call_lens(
         InterfaceMechanismsLensOutput,
@@ -172,6 +179,7 @@ def run_lens_calls(
         paper_titles,
         complete_fn,
         on_status=on_status,
+        model=interface_model,
     )
     skeptic = _call_lens(
         ReliabilitySkepticLensOutput,
@@ -182,6 +190,7 @@ def run_lens_calls(
         paper_titles,
         complete_fn,
         on_status=on_status,
+        model=skeptic_model,
     )
     return LensBundle(physical=physical, interface=interface, skeptic=skeptic)
 
@@ -358,6 +367,10 @@ def run_synthesis(
     paper_titles: dict[int, str] | None = None,
     complete: CompleteFn | None = None,
     on_status: Callable[[str], None] | None = None,
+    *,
+    physical_model: str | None = None,
+    interface_model: str | None = None,
+    skeptic_model: str | None = None,
 ) -> tuple[Optional[BriefingDocument], Optional[str], list[MeasurementRow]]:
     usable = quoted_rows(rows)
     stop = stop_message_if_insufficient(rows)
@@ -370,6 +383,9 @@ def run_synthesis(
         paper_titles,
         complete=complete,
         on_status=on_status,
+        physical_model=physical_model,
+        interface_model=interface_model,
+        skeptic_model=skeptic_model,
     )
     briefing = assemble_briefing(bundle, usable, paper_titles)
     return briefing, None, usable
